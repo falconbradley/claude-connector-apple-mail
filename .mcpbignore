@@ -1,0 +1,29 @@
+# Build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Dev files
+.git/
+.github/
+.venv/
+.env
+.env.*
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Claude config (not part of the extension)
+.claude/
+
+# Old install script (replaced by mcpb install flow)
+install.sh

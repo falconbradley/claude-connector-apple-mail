@@ -1,0 +1,32 @@
+# Build artifacts
+dist/
+build/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+
+# Logs
+*.log
+
+# uv
+uv.lock

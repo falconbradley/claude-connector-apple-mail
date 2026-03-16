@@ -1,0 +1,53 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/mcpb-manifest.schema.json",
+  "manifest_version": "0.4",
+
+  "name": "apple-mail",
+  "display_name": "Apple Mail",
+  "version": "0.1.0",
+  "description": "Read-only access to Apple Mail on macOS — search emails, read messages, list attachments, and view threads via Mail.app's scripting interface.",
+  "long_description": "Connects Claude to Apple Mail on your Mac via Mail.app's native scripting interface. No database access or special permissions needed.\n\n**Features:**\n- Search emails by subject, sender, date range, flags, and attachments\n- Read full message bodies (plain text and HTML)\n- View email threads / conversations\n- List and retrieve attachments\n- Browse all mailboxes and accounts\n\n**Requirements:**\n- macOS 13 Ventura or later\n- Apple Mail running\n- Automation permission (macOS prompts automatically on first use)",
+
+  "author": {
+    "name": "Brad"
+  },
+
+  "icon": "icon.png",
+  "icons": [
+    { "src": "icons/icon-128.png", "size": "128x128" },
+    { "src": "icons/icon-256.png", "size": "256x256" },
+    { "src": "icons/icon-512.png", "size": "512x512" }
+  ],
+
+  "server": {
+    "type": "uv",
+    "entry_point": "src/apple_mail_mcp/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--project", "${__dirname}", "apple-mail-mcp"],
+      "env": {}
+    }
+  },
+
+  "tools": [
+    { "name": "get_stats",         "description": "Get overall mail statistics: total messages, unread count, mailbox count" },
+    { "name": "list_mailboxes",    "description": "List all mailboxes/folders across all accounts with message counts" },
+    { "name": "search_emails",     "description": "Search emails by text, sender, recipient (To/CC), subject, date range, read/flagged status, and attachments" },
+    { "name": "get_email",         "description": "Read a full email with plain-text body, recipients, and metadata" },
+    { "name": "get_email_link",    "description": "Get a message:// URL that opens the email directly in Mail.app" },
+    { "name": "get_email_html",    "description": "Get the HTML body of an email" },
+    { "name": "get_thread",        "description": "Get all messages in a conversation thread" },
+    { "name": "list_email_attachments", "description": "List all attachments for a specific email" },
+    { "name": "get_email_attachment",   "description": "Retrieve an attachment as base64-encoded data" }
+  ],
+
+  "keywords": ["apple", "mail", "email", "macos", "search", "attachments", "inbox"],
+  "license": "MIT",
+
+  "compatibility": {
+    "platforms": ["darwin"],
+    "runtimes": {
+      "python": ">=3.11"
+    }
+  }
+}
