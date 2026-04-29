@@ -1095,16 +1095,16 @@ class MailBridge:
                         if (mboxes[j].name().toLowerCase().indexOf("draft") === -1) continue;
                         try {{
                             var candidates = mboxes[j].messages.whose({{subject: "{safe_subject}"}});
-                            var latest = null, latestDate = null;
+                            var latest = -1, latestDate = null;
                             for (var k = 0; k < candidates.length; k++) {{
-                                var ds = candidates[k].dateSent() || candidates[k].dateReceived();
-                                // Only consider drafts saved at or after our timestamp
-                                // to avoid matching pre-existing drafts with the same subject.
-                                if (ds && ds >= createdAfter && (!latestDate || ds > latestDate)) {{
-                                    latestDate = ds; latest = candidates[k];
-                                }}
+                                // Per-message try/catch: a bad message must not abort the loop.
+                                var ds = null;
+                                try {{ ds = candidates[k].dateSent(); }} catch(e) {{}}
+                                if (!ds) {{ try {{ ds = candidates[k].dateReceived(); }} catch(e) {{}} }}
+                                if (!ds || ds < createdAfter) continue;
+                                if (!latestDate || ds > latestDate) {{ latestDate = ds; latest = k; }}
                             }}
-                            if (latest) {{ try {{ msgId = latest.messageId(); }} catch(e2) {{}} }}
+                            if (latest >= 0) {{ try {{ msgId = candidates[latest].messageId(); }} catch(e2) {{}} }}
                         }} catch(e) {{}}
                         if (msgId) break outer;
                     }}
