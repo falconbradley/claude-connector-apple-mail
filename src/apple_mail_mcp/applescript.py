@@ -1040,7 +1040,7 @@ class MailBridge:
         safe_body = _js_escape(body)
 
         def recip_js(kind: str, addrs: list[str]) -> str:
-            cls_map = {"to": "to recipient", "cc": "cc recipient", "bcc": "bcc recipient"}
+            cls_map = {"to": "ToRecipient", "cc": "CcRecipient", "bcc": "BccRecipient"}
             field_map = {"to": "toRecipients", "cc": "ccRecipients", "bcc": "bccRecipients"}
             cls = cls_map[kind]
             field = field_map[kind]
@@ -1048,9 +1048,9 @@ class MailBridge:
             for addr in addrs:
                 name, email = _parse_address(addr)
                 lines.append(
-                    f'mail.make({{new: "{cls}", '
-                    f'withProperties: {{address: "{_js_escape(email)}", name: "{_js_escape(name)}"}}, '
-                    f'at: draft.{field}.end}});'
+                    f'draft.{field}.push('
+                    f'mail.{cls}({{address: "{_js_escape(email)}", name: "{_js_escape(name)}"}}'
+                    f'));'
                 )
             return "\n        ".join(lines)
 
@@ -1066,14 +1066,14 @@ class MailBridge:
             // pre-existing drafts with the same subject.
             var createdAfter = new Date();
 
-            var draft = mail.make({{
-                new: "outgoing message",
-                withProperties: {{
-                    subject: "{safe_subject}",
-                    content: "{safe_body}",
-                    visible: false
-                }}
+            // Use JXA constructor style — mail.make() is not supported for
+            // outgoing messages in Mail.app's JXA dictionary.
+            var draft = mail.OutgoingMessage({{
+                subject: "{safe_subject}",
+                content: "{safe_body}",
+                visible: false
             }});
+            mail.outgoingMessages.push(draft);
 
             {to_js}
             {cc_js}
