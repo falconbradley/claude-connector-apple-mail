@@ -4,9 +4,9 @@
 
   "name": "apple-mail",
   "display_name": "Apple Mail",
-  "version": "0.1.0",
-  "description": "Read-only access to Apple Mail on macOS — search emails, read messages, list attachments, and view threads via Mail.app's scripting interface.",
-  "long_description": "Connects Claude to Apple Mail on your Mac via Mail.app's native scripting interface. No database access or special permissions needed.\n\n**Features:**\n- Search emails by subject, sender, date range, flags, and attachments\n- Read full message bodies (plain text and HTML)\n- View email threads / conversations\n- List and retrieve attachments\n- Browse all mailboxes and accounts\n\n**Requirements:**\n- macOS 13 Ventura or later\n- Apple Mail running\n- Automation permission (macOS prompts automatically on first use)",
+  "version": "0.2.0",
+  "description": "Access Apple Mail on macOS — search emails, read messages, create drafts, list attachments, and view threads via Mail.app's scripting interface.",
+  "long_description": "Connects Claude to Apple Mail on your Mac via Mail.app's native scripting interface. No database access or special permissions needed.\n\n**Features:**\n- Search emails by subject, sender, date range, flags, and attachments\n- Read full message bodies (plain text and HTML)\n- View email threads / conversations\n- List and retrieve attachments\n- Browse all mailboxes and accounts\n- Create draft emails (saved to Drafts with a link to open in Mail.app)\n\n**Requirements:**\n- macOS 13 Ventura or later\n- Apple Mail running\n- Automation permission (macOS prompts automatically on first use)",
 
   "author": {
     "name": "Brad"
@@ -38,10 +38,11 @@
     { "name": "get_email_html",    "description": "Get the HTML body of an email" },
     { "name": "get_thread",        "description": "Get all messages in a conversation thread" },
     { "name": "list_email_attachments", "description": "List all attachments for a specific email" },
-    { "name": "get_email_attachment",   "description": "Retrieve an attachment as base64-encoded data" }
+    { "name": "get_email_attachment",   "description": "Retrieve an attachment as base64-encoded data" },
+    { "name": "create_email_draft",     "description": "Create a draft email in Mail.app and return a message:// link to open it" }
   ],
 
-  "keywords": ["apple", "mail", "email", "macos", "search", "attachments", "inbox"],
+  "keywords": ["apple", "mail", "email", "macos", "search", "attachments", "inbox", "draft", "compose"],
   "license": "MIT",
 
   "compatibility": {

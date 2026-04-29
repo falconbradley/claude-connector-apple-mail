@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 import time
 from datetime import datetime
+from email.utils import parseaddr as _parseaddr
 from pathlib import Path
 from typing import Any, Optional
 
@@ -40,6 +41,12 @@ def _strip_subject_prefixes(subj: str) -> str:
         prev = subj
         subj = _RE_PREFIX.sub("", subj).strip()
     return subj
+
+
+def _parse_address(addr: str) -> tuple[str, str]:
+    """Split 'Name <email>' into (name, email). Falls back to ('', addr)."""
+    name, email = _parseaddr(addr)
+    return name or "", email or addr
 
 
 def _js_escape(value: str) -> str:
@@ -1012,6 +1019,105 @@ class MailBridge:
                 message_id,
             )
             return filename, mime_type, raw_bytes
+
+    def create_draft(
+        self,
+        *,
+        to_addresses: list[str],
+        subject: str,
+        body: str,
+        cc_addresses: list[str] | None = None,
+        bcc_addresses: list[str] | None = None,
+    ) -> dict:
+        """Create a draft email in Mail.app.
+
+        Returns:
+            {"success": bool, "message_id": str | None}
+            message_id is the RFC 2822 Message-ID for constructing a message:// link,
+            or None if Mail.app did not expose one on the saved draft.
+        """
+        safe_subject = _js_escape(subject)
+        safe_body = _js_escape(body)
+
+        def recip_js(kind: str, addrs: list[str]) -> str:
+            cls_map = {"to": "ToRecipient", "cc": "CcRecipient", "bcc": "BccRecipient"}
+            field_map = {"to": "toRecipients", "cc": "ccRecipients", "bcc": "bccRecipients"}
+            cls = cls_map[kind]
+            field = field_map[kind]
+            lines = []
+            for addr in addrs:
+                name, email = _parse_address(addr)
+                lines.append(
+                    f'draft.{field}.push('
+                    f'mail.{cls}({{address: "{_js_escape(email)}", name: "{_js_escape(name)}"}}'
+                    f'));'
+                )
+            return "\n        ".join(lines)
+
+        to_js = recip_js("to", to_addresses)
+        cc_js = recip_js("cc", cc_addresses or [])
+        bcc_js = recip_js("bcc", bcc_addresses or [])
+
+        script = f"""
+        (function() {{
+            var mail = Application("Mail");
+
+            // Record time before saving so the fallback search can exclude
+            // pre-existing drafts with the same subject.
+            var createdAfter = new Date();
+
+            // Use JXA constructor style — mail.make() is not supported for
+            // outgoing messages in Mail.app's JXA dictionary.
+            var draft = mail.OutgoingMessage({{
+                subject: "{safe_subject}",
+                content: "{safe_body}",
+                visible: false
+            }});
+            mail.outgoingMessages.push(draft);
+
+            {to_js}
+            {cc_js}
+            {bcc_js}
+
+            draft.save();
+
+            // Draft Message-IDs are typically not assigned until send; this is
+            // expected to return null in most cases, so the fallback below is
+            // the real code path.
+            var msgId = null;
+            try {{ msgId = draft.messageId(); }} catch(e) {{}}
+
+            if (!msgId) {{
+                var accounts = mail.accounts();
+                outer: for (var i = 0; i < accounts.length; i++) {{
+                    var mboxes = accounts[i].mailboxes();
+                    for (var j = 0; j < mboxes.length; j++) {{
+                        if (mboxes[j].name().toLowerCase().indexOf("draft") === -1) continue;
+                        try {{
+                            var candidates = mboxes[j].messages.whose({{subject: "{safe_subject}"}});
+                            var latest = -1, latestDate = null;
+                            for (var k = 0; k < candidates.length; k++) {{
+                                // Per-message try/catch: a bad message must not abort the loop.
+                                var ds = null;
+                                try {{ ds = candidates[k].dateSent(); }} catch(e) {{}}
+                                if (!ds) {{ try {{ ds = candidates[k].dateReceived(); }} catch(e) {{}} }}
+                                if (!ds || ds < createdAfter) continue;
+                                if (!latestDate || ds > latestDate) {{ latestDate = ds; latest = k; }}
+                            }}
+                            if (latest >= 0) {{ try {{ msgId = candidates[latest].messageId(); }} catch(e2) {{}} }}
+                        }} catch(e) {{}}
+                        if (msgId) break outer;
+                    }}
+                }}
+            }}
+
+            return JSON.stringify({{"success": true, "message_id": msgId}});
+        }})();
+        """
+        result = self._run_jxa(script, timeout=30)
+        if result is None:
+            return {"success": False, "message_id": None}
+        return result
 
     # ------------------------------------------------------------------
     # Private helpers

@@ -43,6 +43,7 @@ from .emlx import get_html_body
 from .models import (
     Attachment,
     AttachmentData,
+    DraftResult,
     EmailDetail,
     EmailSummary,
     Mailbox,
@@ -76,9 +77,9 @@ _bridge: Optional[MailBridge] = None
 mcp = FastMCP(
     "Apple Mail",
     instructions=(
-        "Read-only access to Apple Mail on this Mac via Mail.app. "
+        "Access to Apple Mail on this Mac via Mail.app. "
         "You can list mailboxes, search emails, read message bodies, "
-        "list and retrieve attachments."
+        "list and retrieve attachments, and create draft emails."
     ),
 )
 
@@ -424,6 +425,51 @@ def get_email_attachment(message_id: int, attachment_index: int) -> AttachmentDa
         content_type=content_type,
         size=len(data),
         data_base64=base64.b64encode(data).decode("ascii"),
+    )
+
+
+@mcp.tool()
+def create_email_draft(
+    to: list[str],
+    subject: str,
+    body: str,
+    cc: Optional[list[str]] = None,
+    bcc: Optional[list[str]] = None,
+) -> DraftResult:
+    """Create a draft email in Mail.app and return a link to open it.
+
+    The draft is saved to the Drafts mailbox. The returned draft_link is a
+    message:// URL that opens the draft directly in Mail.app when clicked.
+
+    Args:
+        to:      Recipient addresses, e.g. ["Name <user@example.com>", "other@example.com"].
+        subject: Subject line.
+        body:    Plain-text body.
+        cc:      Optional CC addresses (same format as `to`).
+        bcc:     Optional BCC addresses (same format as `to`).
+    """
+    if not to:
+        raise ValueError("At least one recipient in `to` is required.")
+
+    bridge = _require_bridge()
+    result = bridge.create_draft(
+        to_addresses=to,
+        subject=subject,
+        body=body,
+        cc_addresses=cc,
+        bcc_addresses=bcc,
+    )
+
+    if not result.get("success"):
+        raise RuntimeError("Failed to create draft in Mail.app.")
+
+    rfc_id = result.get("message_id")
+    return DraftResult(
+        subject=subject,
+        to_addresses=to,
+        cc_addresses=cc or [],
+        bcc_addresses=bcc or [],
+        draft_link=_make_mail_link(rfc_id),
     )
 
 
