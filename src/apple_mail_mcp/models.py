@@ -69,3 +69,11 @@ class MailboxStats(BaseModel):
     unread_messages: int
     mailbox_count: int
     account_count: int
+
+
+class DraftResult(BaseModel):
+    subject: str
+    to_addresses: list[str]
+    cc_addresses: list[str] = []
+    bcc_addresses: list[str] = []
+    draft_link: Optional[str] = None  # message:// URL to open draft in Mail.app
