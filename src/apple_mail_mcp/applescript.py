@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import plistlib
 import re
 import subprocess
 import tempfile
@@ -32,6 +33,18 @@ logger = logging.getLogger("apple_mail_mcp.applescript")
 # ---------------------------------------------------------------------------
 
 _RE_PREFIX = re.compile(r"^(Re|Fwd|Fw)\s*:\s*", re.IGNORECASE)
+
+# Flag color name → flagIndex integer (0 = no flag, 1–7 = red … gray).
+# Confirmed via JXA probe: msg.flagIndex() returns 1 for a red-flagged message.
+_FLAG_COLOR_MAP: dict[str, int] = {
+    "red": 1, "orange": 2, "yellow": 3,
+    "green": 4, "blue": 5, "purple": 6, "gray": 7,
+}
+_FLAG_COLOR_ORDER = ["red", "orange", "yellow", "green", "blue", "purple", "gray"]
+_FLAG_DEFAULTS = [
+    "Red Flag", "Orange Flag", "Yellow Flag",
+    "Green Flag", "Blue Flag", "Purple Flag", "Gray Flag",
+]
 
 
 def _strip_subject_prefixes(subj: str) -> str:
@@ -1118,6 +1131,191 @@ class MailBridge:
         if result is None:
             return {"success": False, "message_id": None}
         return result
+
+    def get_flag(self, message_id: int) -> dict:
+        """Return flag status and color index for a message.
+
+        Returns:
+            {"is_flagged": bool, "color_index": int, "flag_color": str | None}
+            flag_color is a color name like "red" or None when unflagged.
+        """
+        location = self._find_message(message_id)
+        if location is None:
+            raise ValueError(f"Message {message_id} not found.")
+
+        acct_name, mbox_name, _ = location
+        safe_acct = _js_escape(acct_name)
+        safe_mbox = _js_escape(mbox_name)
+
+        script = f"""
+        (function() {{
+            var mail = Application("Mail");
+            var accounts = mail.accounts.whose({{name: "{safe_acct}"}});
+            if (accounts.length === 0) return JSON.stringify(null);
+            var acct = accounts[0];
+            var mboxes = acct.mailboxes.whose({{name: "{safe_mbox}"}});
+            if (mboxes.length === 0) return JSON.stringify(null);
+            var mb = mboxes[0];
+
+            var msgs = mb.messages.whose({{id: {message_id}}});
+            if (msgs.length === 0) return JSON.stringify(null);
+            var msg = msgs[0];
+
+            var isFlagged = msg.flaggedStatus() ? true : false;
+            // flagIndex() returns -1 when unflagged, 1-7 for colors.
+            // Fall back to isFlagged ? 1 : -1 if the property is unavailable.
+            var colorIdx = isFlagged ? 1 : -1;
+            try {{
+                colorIdx = msg.flagIndex();
+            }} catch(e) {{}}
+            return JSON.stringify({{is_flagged: isFlagged, color_index: colorIdx}});
+        }})();
+        """
+        result = self._run_jxa(script, timeout=30)
+        if result is None:
+            raise ValueError(f"Message {message_id} not found.")
+
+        color_index: int = result.get("color_index", -1)
+        flag_color: Optional[str] = (
+            _FLAG_COLOR_ORDER[color_index - 1] if 1 <= color_index <= 7 else None
+        )
+        return {
+            "is_flagged": bool(result.get("is_flagged", False)),
+            "color_index": color_index,
+            "flag_color": flag_color,
+        }
+
+    def set_flag(self, message_id: int, flag: Optional[str] = None) -> dict:
+        """Set or remove the flag on a message.
+
+        Args:
+            flag: A color string ("red", "orange", etc.) or None to remove the flag.
+
+        Returns:
+            {"success": bool, "is_flagged": bool}
+        """
+        location = self._find_message(message_id)
+        if location is None:
+            raise ValueError(f"Message {message_id} not found.")
+
+        acct_name, mbox_name, _ = location
+        safe_acct = _js_escape(acct_name)
+        safe_mbox = _js_escape(mbox_name)
+        # color_index: 1-7 = set color, -1/None = unflag via flaggedStatus = false
+        color_index = _FLAG_COLOR_MAP[flag] if flag is not None else -1
+
+        script = f"""
+        (function() {{
+            var mail = Application("Mail");
+            var accounts = mail.accounts.whose({{name: "{safe_acct}"}});
+            if (accounts.length === 0) return JSON.stringify({{success: false, error: "account not found"}});
+            var acct = accounts[0];
+            var mboxes = acct.mailboxes.whose({{name: "{safe_mbox}"}});
+            if (mboxes.length === 0) return JSON.stringify({{success: false, error: "mailbox not found"}});
+            var mb = mboxes[0];
+
+            var msgs = mb.messages.whose({{id: {message_id}}});
+            if (msgs.length === 0) return JSON.stringify({{success: false, error: "message not found"}});
+            var msg = msgs[0];
+
+            var colorIdx = {color_index};
+            if (colorIdx < 1) {{
+                // Unflag: flaggedStatus = false sets flagIndex to -1
+                msg.flaggedStatus = false;
+            }} else {{
+                // Set specific color via flagIndex (confirmed in JXA probe)
+                try {{
+                    msg.flagIndex = colorIdx;
+                }} catch(e) {{
+                    // Fallback: boolean flag (always red)
+                    msg.flaggedStatus = true;
+                }}
+            }}
+
+            var isFlagged = msg.flaggedStatus() ? true : false;
+            return JSON.stringify({{success: true, is_flagged: isFlagged}});
+        }})();
+        """
+        result = self._run_jxa(script, timeout=30)
+        if result is None:
+            return {"success": False, "is_flagged": False}
+        return result
+
+    @staticmethod
+    def _flag_names_config_path() -> Path:
+        """Return the path to the MCP server's local flag-names config file."""
+        config_dir = Path.home() / ".config" / "apple-mail-mcp"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        return config_dir / "flag_names.json"
+
+    def get_flag_names(self) -> list[str]:
+        """Return the 7 custom flag display names.
+
+        Priority:
+          1. Names saved by set_flag_names (stored in ~/.config/apple-mail-mcp/flag_names.json)
+          2. Names set in Mail.app's own preferences (via defaults export)
+          3. Built-in color-name defaults
+
+        Returns a list of 7 strings in order: red, orange, yellow, green, blue, purple, gray.
+        """
+        # 1. Local MCP config file
+        config_path = self._flag_names_config_path()
+        try:
+            if config_path.exists():
+                import json as _json
+                raw = _json.loads(config_path.read_text())
+                if isinstance(raw, list) and len(raw) == 7:
+                    return [str(n) for n in raw]
+        except Exception:
+            pass
+
+        # 2. Mail.app preferences (read-only via defaults export)
+        try:
+            proc = subprocess.run(
+                ["defaults", "export", "com.apple.mail", "-"],
+                capture_output=True,
+                timeout=10,
+            )
+            if proc.returncode == 0:
+                data = plistlib.loads(proc.stdout)
+                names = data.get("FlagNames")
+                if isinstance(names, list) and len(names) == 7:
+                    return [str(n) for n in names]
+        except Exception:
+            pass
+
+        # 3. Built-in defaults
+        return list(_FLAG_DEFAULTS)
+
+    def set_flag_names(self, updates: dict[str, str]) -> list[str]:
+        """Update custom display names for one or more flag colors.
+
+        Names are saved in ~/.config/apple-mail-mcp/flag_names.json and used
+        by get_email_flag and get_flag_names. This does not change Mail.app's
+        own sidebar labels — to change those, right-click a flag mailbox in
+        Mail.app's sidebar and rename it there.
+
+        Args:
+            updates: Mapping of color name (e.g. "red") to new display name (e.g. "Urgent").
+                     Only the specified colors are changed; others keep their current values.
+
+        Returns:
+            Updated list of 7 names in _FLAG_COLOR_ORDER sequence.
+        """
+        import json as _json
+
+        current = self.get_flag_names()
+        for color, name in updates.items():
+            idx = _FLAG_COLOR_ORDER.index(color)
+            current[idx] = name
+
+        config_path = self._flag_names_config_path()
+        try:
+            config_path.write_text(_json.dumps(current))
+        except OSError as exc:
+            raise RuntimeError(f"Failed to save flag names: {exc}") from exc
+
+        return current
 
     # ------------------------------------------------------------------
     # Private helpers

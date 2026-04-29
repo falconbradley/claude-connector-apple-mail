@@ -40,6 +40,7 @@ class EmailDetail(EmailSummary):
     bcc_addresses: list[str] = []
     body_text: Optional[str] = None
     attachment_count: int = 0
+    flag_color: Optional[str] = None  # e.g. "orange", or None if unflagged/not readable
 
 
 class Attachment(BaseModel):
@@ -77,3 +78,26 @@ class DraftResult(BaseModel):
     cc_addresses: list[str] = []
     bcc_addresses: list[str] = []
     draft_link: Optional[str] = None  # message:// URL to open draft in Mail.app
+
+
+class FlagStatus(BaseModel):
+    message_id: int
+    is_flagged: bool
+    flag_color: Optional[str] = None  # None when unflagged; e.g. "red", "orange"
+    flag_name: Optional[str] = None   # Custom display name (e.g. "Urgent"), or None
+
+
+class FlagResult(BaseModel):
+    message_id: int
+    flag_color: Optional[str] = None  # None = unflagged
+    success: bool
+
+
+class FlagNames(BaseModel):
+    red: str
+    orange: str
+    yellow: str
+    green: str
+    blue: str
+    purple: str
+    gray: str
