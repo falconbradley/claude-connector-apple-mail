@@ -1233,7 +1233,10 @@ class MailBridge:
             }}
 
             var isFlagged = msg.flaggedStatus() ? true : false;
-            return JSON.stringify({{success: true, is_flagged: isFlagged}});
+            // Read back the actual flag index so the caller knows the true resulting color.
+            var actualIdx = isFlagged ? 1 : -1;
+            try {{ actualIdx = msg.flagIndex(); }} catch(e) {{}}
+            return JSON.stringify({{success: true, is_flagged: isFlagged, color_index: actualIdx}});
         }})();
         """
         result = self._run_jxa(script, timeout=30)
@@ -1244,9 +1247,7 @@ class MailBridge:
     @staticmethod
     def _flag_names_config_path() -> Path:
         """Return the path to the MCP server's local flag-names config file."""
-        config_dir = Path.home() / ".config" / "apple-mail-mcp"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        return config_dir / "flag_names.json"
+        return Path.home() / ".config" / "apple-mail-mcp" / "flag_names.json"
 
     def get_flag_names(self) -> list[str]:
         """Return the 7 custom flag display names.
@@ -1262,8 +1263,7 @@ class MailBridge:
         config_path = self._flag_names_config_path()
         try:
             if config_path.exists():
-                import json as _json
-                raw = _json.loads(config_path.read_text())
+                raw = json.loads(config_path.read_text())
                 if isinstance(raw, list) and len(raw) == 7:
                     return [str(n) for n in raw]
         except Exception:
@@ -1302,16 +1302,21 @@ class MailBridge:
         Returns:
             Updated list of 7 names in _FLAG_COLOR_ORDER sequence.
         """
-        import json as _json
+        for color in updates:
+            if color not in _FLAG_COLOR_MAP:
+                raise ValueError(
+                    f"Unknown flag color {color!r}. "
+                    f"Valid colors: {', '.join(_FLAG_COLOR_ORDER)}."
+                )
 
         current = self.get_flag_names()
         for color, name in updates.items():
-            idx = _FLAG_COLOR_ORDER.index(color)
-            current[idx] = name
+            current[_FLAG_COLOR_ORDER.index(color)] = name
 
         config_path = self._flag_names_config_path()
+        config_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            config_path.write_text(_json.dumps(current))
+            config_path.write_text(json.dumps(current))
         except OSError as exc:
             raise RuntimeError(f"Failed to save flag names: {exc}") from exc
 

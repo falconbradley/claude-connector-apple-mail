@@ -77,6 +77,8 @@ logger = logging.getLogger("apple_mail_mcp")
 
 _bridge: Optional[MailBridge] = None
 
+_VALID_FLAG_COLORS = frozenset({"red", "orange", "yellow", "green", "blue", "purple", "gray"})
+
 # ---------------------------------------------------------------------------
 # FastMCP app
 # ---------------------------------------------------------------------------
@@ -296,7 +298,6 @@ def get_email(message_id: int) -> EmailDetail:
 
     summary = _dict_to_summary(d)
 
-    # Get attachment count and flag color in parallel (cached location, fast)
     attachments = bridge.list_attachments(message_id)
     attachment_count = len(attachments)
 
@@ -469,9 +470,6 @@ def get_email_flag(message_id: int) -> FlagStatus:
     )
 
 
-_VALID_FLAG_COLORS = frozenset({"red", "orange", "yellow", "green", "blue", "purple", "gray"})
-
-
 @mcp.tool()
 def set_email_flag(
     message_id: int,
@@ -493,7 +491,13 @@ def set_email_flag(
     result = bridge.set_flag(message_id, flag)
     if not result.get("success"):
         raise RuntimeError(f"Failed to set flag on message {message_id}.")
-    return FlagResult(message_id=message_id, flag_color=flag, success=True)
+    # Use the color_index read back from Mail.app — if the boolean fallback fired,
+    # the actual color may differ from what was requested (always red in that case).
+    actual_color: Optional[str] = None
+    color_index = result.get("color_index", -1)
+    if isinstance(color_index, int) and 1 <= color_index <= 7:
+        actual_color = _FLAG_COLOR_ORDER[color_index - 1]
+    return FlagResult(message_id=message_id, flag_color=actual_color, success=True)
 
 
 @mcp.tool()
