@@ -1040,7 +1040,7 @@ class MailBridge:
         safe_body = _js_escape(body)
 
         def recip_js(kind: str, addrs: list[str]) -> str:
-            cls_map = {"to": "ToRecipient", "cc": "CcRecipient", "bcc": "BccRecipient"}
+            cls_map = {"to": "to recipient", "cc": "cc recipient", "bcc": "bcc recipient"}
             field_map = {"to": "toRecipients", "cc": "ccRecipients", "bcc": "bccRecipients"}
             cls = cls_map[kind]
             field = field_map[kind]
