@@ -1,6 +1,6 @@
 # Apple Mail MCP
 
-A Claude Desktop extension that gives **Claude read-only access to Apple Mail** on macOS via Mail.app's native scripting interface. No IMAP credentials, no database access, no Full Disk Access needed — just Automation permission, which macOS prompts for automatically.
+A Claude Desktop extension that gives **Claude access to Apple Mail** on macOS via Mail.app's native scripting interface. No IMAP credentials, no database access, no Full Disk Access needed — just Automation permission, which macOS prompts for automatically.
 
 Packaged as an [MCPB desktop extension](https://support.claude.com/en/articles/12922929-building-desktop-extensions-with-mcpb) with the Apple Mail icon and one-click install.
 
@@ -19,6 +19,7 @@ Packaged as an [MCPB desktop extension](https://support.claude.com/en/articles/1
 | `get_thread` | All messages in a conversation thread |
 | `list_email_attachments` | Enumerate attachments for any email |
 | `get_email_attachment` | Retrieve attachment content (base64) |
+| `create_email_draft` | Create a draft email saved to Mail.app's Drafts mailbox, returns a `message://` link to open it |
 
 ## How it works
 
@@ -97,6 +98,8 @@ Once installed, just ask Claude naturally:
 - *"What attachments are in the last email from my accountant?"*
 - *"Summarise the email thread about the contract renewal"*
 - *"Find flagged emails with PDF attachments"*
+- *"Draft a reply to John's email about the project update"*
+- *"Create a draft email to the team announcing Friday's meeting"*
 
 ---
 
@@ -155,7 +158,7 @@ Times measured against ~61K messages across 7 mailboxes. Searches without option
 
 ## Roadmap
 
-**Phase 1 — Read (current)**
+**Phase 1 — Read**
 - [x] List mailboxes and accounts
 - [x] Search emails (subject, sender, recipient, date, flags, attachments)
 - [x] Read full message body (plain text + HTML)
@@ -163,7 +166,8 @@ Times measured against ~61K messages across 7 mailboxes. Searches without option
 - [x] List and retrieve attachments
 - [x] `message://` links to open emails in Mail.app
 
-**Phase 2 — Write (planned)**
+**Phase 2 — Write (in progress)**
+- [x] Create draft emails (saved to Drafts with a `message://` link to open)
 - [ ] Mark as read / unread
 - [ ] Flag / unflag
 - [ ] Move to folder
@@ -173,7 +177,7 @@ Times measured against ~61K messages across 7 mailboxes. Searches without option
 
 ## Security & privacy
 
-- All operations are **read-only** — the server never modifies your mail.
+- Read operations never modify your mail. The only write operation is `create_email_draft`, which saves a draft locally — it does not send anything.
 - No data leaves your machine — this is a local MCP server.
 - Only requires Automation permission, not Full Disk Access.
 - macOS-only (`"platforms": ["darwin"]` in manifest).
