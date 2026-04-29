@@ -19,6 +19,10 @@ Tools provided
   get_thread            - All emails in a conversation thread
   list_email_attachments - Enumerate attachments for an email
   get_email_attachment   - Download attachment as base64
+  get_email_flag        - Flag status, color, and display name for a message
+  set_email_flag        - Set or remove a color flag on a message
+  get_flag_names        - Get custom display names for all 7 flag colors
+  set_flag_names        - Update flag display names (partial update)
 
 Requirements
 ------------
@@ -38,7 +42,7 @@ from urllib.parse import quote
 
 from mcp.server.fastmcp import FastMCP
 
-from .applescript import MailBridge
+from .applescript import MailBridge, _FLAG_COLOR_ORDER
 from .emlx import get_html_body
 from .models import (
     Attachment,
@@ -46,6 +50,9 @@ from .models import (
     DraftResult,
     EmailDetail,
     EmailSummary,
+    FlagNames,
+    FlagResult,
+    FlagStatus,
     Mailbox,
     MailboxStats,
     SearchResult,
@@ -69,6 +76,8 @@ logger = logging.getLogger("apple_mail_mcp")
 # ---------------------------------------------------------------------------
 
 _bridge: Optional[MailBridge] = None
+
+_VALID_FLAG_COLORS = frozenset({"red", "orange", "yellow", "green", "blue", "purple", "gray"})
 
 # ---------------------------------------------------------------------------
 # FastMCP app
@@ -289,9 +298,15 @@ def get_email(message_id: int) -> EmailDetail:
 
     summary = _dict_to_summary(d)
 
-    # Get attachment count
     attachments = bridge.list_attachments(message_id)
     attachment_count = len(attachments)
+
+    flag_color: Optional[str] = None
+    try:
+        flag_info = bridge.get_flag(message_id)
+        flag_color = flag_info.get("flag_color")
+    except Exception:
+        pass
 
     return EmailDetail(
         **summary.model_dump(),
@@ -299,6 +314,7 @@ def get_email(message_id: int) -> EmailDetail:
         cc_addresses=d.get("cc_recipients", []),
         body_text=d.get("body_text"),
         attachment_count=attachment_count,
+        flag_color=flag_color,
     )
 
 
@@ -425,6 +441,118 @@ def get_email_attachment(message_id: int, attachment_index: int) -> AttachmentDa
         content_type=content_type,
         size=len(data),
         data_base64=base64.b64encode(data).decode("ascii"),
+    )
+
+
+@mcp.tool()
+def get_email_flag(message_id: int) -> FlagStatus:
+    """Get the flag status, color, and display name for an email.
+
+    Returns whether the message is flagged, what color the flag is, and the
+    custom display name for that color (e.g. "Urgent" if red was renamed).
+
+    Args:
+        message_id: The integer ID from search_emails results.
+    """
+    bridge = _require_bridge()
+    result = bridge.get_flag(message_id)
+    flag_color = result.get("flag_color")
+    flag_name: Optional[str] = None
+    if flag_color:
+        names = bridge.get_flag_names()
+        idx = _FLAG_COLOR_ORDER.index(flag_color)
+        flag_name = names[idx]
+    return FlagStatus(
+        message_id=message_id,
+        is_flagged=result["is_flagged"],
+        flag_color=flag_color,
+        flag_name=flag_name,
+    )
+
+
+@mcp.tool()
+def set_email_flag(
+    message_id: int,
+    flag: Optional[str] = None,
+) -> FlagResult:
+    """Set or remove the flag on an email in Apple Mail.
+
+    Args:
+        message_id: The integer ID from search_emails results.
+        flag: Flag color to set: "red", "orange", "yellow", "green", "blue",
+              "purple", or "gray". Pass null/None to remove the flag.
+    """
+    if flag is not None and flag not in _VALID_FLAG_COLORS:
+        raise ValueError(
+            f"Invalid flag color {flag!r}. "
+            f"Choose from: {', '.join(sorted(_VALID_FLAG_COLORS))}, or null to remove."
+        )
+    bridge = _require_bridge()
+    result = bridge.set_flag(message_id, flag)
+    if not result.get("success"):
+        raise RuntimeError(f"Failed to set flag on message {message_id}.")
+    # Use the color_index read back from Mail.app — if the boolean fallback fired,
+    # the actual color may differ from what was requested (always red in that case).
+    actual_color: Optional[str] = None
+    color_index = result.get("color_index", -1)
+    if isinstance(color_index, int) and 1 <= color_index <= 7:
+        actual_color = _FLAG_COLOR_ORDER[color_index - 1]
+    return FlagResult(message_id=message_id, flag_color=actual_color, success=True)
+
+
+@mcp.tool()
+def get_flag_names() -> FlagNames:
+    """Get the current display names for all 7 Apple Mail flag colors.
+
+    Returns the custom labels shown in Mail.app's flag menus. If no custom
+    names have been set, returns the default color-based names.
+    """
+    bridge = _require_bridge()
+    names = bridge.get_flag_names()
+    return FlagNames(
+        red=names[0], orange=names[1], yellow=names[2], green=names[3],
+        blue=names[4], purple=names[5], gray=names[6],
+    )
+
+
+@mcp.tool()
+def set_flag_names(
+    red: Optional[str] = None,
+    orange: Optional[str] = None,
+    yellow: Optional[str] = None,
+    green: Optional[str] = None,
+    blue: Optional[str] = None,
+    purple: Optional[str] = None,
+    gray: Optional[str] = None,
+) -> FlagNames:
+    """Set custom display names for Apple Mail flag colors.
+
+    Only the provided colors are updated; unspecified colors keep their
+    current names. Names are saved locally and returned by get_flag_names
+    and get_email_flag. To also rename flags in Mail.app's sidebar, right-
+    click a flag mailbox in the sidebar and rename it there.
+
+    Args:
+        red:    New display name for the red flag (e.g. "Urgent").
+        orange: New display name for the orange flag (e.g. "Review").
+        yellow: New display name for the yellow flag.
+        green:  New display name for the green flag (e.g. "Done").
+        blue:   New display name for the blue flag.
+        purple: New display name for the purple flag.
+        gray:   New display name for the gray flag.
+    """
+    updates = {
+        c: n for c, n in [
+            ("red", red), ("orange", orange), ("yellow", yellow),
+            ("green", green), ("blue", blue), ("purple", purple), ("gray", gray),
+        ]
+        if n is not None
+    }
+    bridge = _require_bridge()
+    names = bridge.set_flag_names(updates) if updates else bridge.get_flag_names()
+    return FlagNames(
+        red=names[0], orange=names[1], yellow=names[2], green=names[3],
+        blue=names[4], purple=names[5], gray=names[6],
     )
 
 
