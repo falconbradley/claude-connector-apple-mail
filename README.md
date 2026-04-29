@@ -13,13 +13,17 @@ Packaged as an [MCPB desktop extension](https://support.claude.com/en/articles/1
 | `get_stats` | Total messages, unread count, mailbox and account counts |
 | `list_mailboxes` | Every account/folder with message counts |
 | `search_emails` | Rich search: free text, sender, recipient (To/CC), subject, date range, read/flagged status, attachments |
-| `get_email` | Full email with decoded plain-text body, recipients, and metadata |
+| `get_email` | Full email with decoded plain-text body, recipients, flag color, and metadata |
 | `get_email_link` | Get a `message://` URL that opens the email directly in Mail.app |
 | `get_email_html` | HTML body of a message |
 | `get_thread` | All messages in a conversation thread |
 | `list_email_attachments` | Enumerate attachments for any email |
 | `get_email_attachment` | Retrieve attachment content (base64) |
 | `create_email_draft` | Create a draft email saved to Mail.app's Drafts mailbox, returns a `message://` link to open it |
+| `get_email_flag` | Get the flag status, color (e.g. `"orange"`), and custom display name for an email |
+| `set_email_flag` | Set or remove a color flag on an email (red/orange/yellow/green/blue/purple/gray, or null to remove) |
+| `get_flag_names` | Get the current display names for all 7 Apple Mail flag colors |
+| `set_flag_names` | Set custom display names for flag colors (e.g. rename red to `"Urgent"`) |
 
 ## How it works
 
@@ -100,6 +104,9 @@ Once installed, just ask Claude naturally:
 - *"Find flagged emails with PDF attachments"*
 - *"Draft a reply to John's email about the project update"*
 - *"Create a draft email to the team announcing Friday's meeting"*
+- *"Flag this email as orange"*
+- *"What color is the flag on that email from Sarah?"*
+- *"Rename the red flag to 'Urgent' and the green flag to 'Done'"*
 
 ---
 
@@ -168,8 +175,9 @@ Times measured against ~61K messages across 7 mailboxes. Searches without option
 
 **Phase 2 — Write (in progress)**
 - [x] Create draft emails (saved to Drafts with a `message://` link to open)
+- [x] Set, change, or remove color flags on emails
+- [x] Customize flag display names (e.g. rename "Red Flag" to "Urgent")
 - [ ] Mark as read / unread
-- [ ] Flag / unflag
 - [ ] Move to folder
 - [ ] Delete (move to Trash)
 
@@ -177,7 +185,7 @@ Times measured against ~61K messages across 7 mailboxes. Searches without option
 
 ## Security & privacy
 
-- Read operations never modify your mail. The only write operation is `create_email_draft`, which saves a draft locally — it does not send anything.
+- Read operations never modify your mail. Write operations are limited to: creating drafts (saved locally, never sent automatically) and setting/removing flags on messages.
 - No data leaves your machine — this is a local MCP server.
 - Only requires Automation permission, not Full Disk Access.
 - macOS-only (`"platforms": ["darwin"]` in manifest).
