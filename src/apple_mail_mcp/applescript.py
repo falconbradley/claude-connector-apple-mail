@@ -1062,6 +1062,10 @@ class MailBridge:
         (function() {{
             var mail = Application("Mail");
 
+            // Record time before saving so the fallback search can exclude
+            // pre-existing drafts with the same subject.
+            var createdAfter = new Date();
+
             var draft = mail.make({{
                 new: "outgoing message",
                 withProperties: {{
@@ -1077,6 +1081,9 @@ class MailBridge:
 
             draft.save();
 
+            // Draft Message-IDs are typically not assigned until send; this is
+            // expected to return null in most cases, so the fallback below is
+            // the real code path.
             var msgId = null;
             try {{ msgId = draft.messageId(); }} catch(e) {{}}
 
@@ -1091,7 +1098,9 @@ class MailBridge:
                             var latest = null, latestDate = null;
                             for (var k = 0; k < candidates.length; k++) {{
                                 var ds = candidates[k].dateSent() || candidates[k].dateReceived();
-                                if (ds && (!latestDate || ds > latestDate)) {{
+                                // Only consider drafts saved at or after our timestamp
+                                // to avoid matching pre-existing drafts with the same subject.
+                                if (ds && ds >= createdAfter && (!latestDate || ds > latestDate)) {{
                                     latestDate = ds; latest = candidates[k];
                                 }}
                             }}
