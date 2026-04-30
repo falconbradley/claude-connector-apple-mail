@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import logging
-import plistlib
 import re
 import subprocess
 import tempfile
@@ -41,10 +40,6 @@ _FLAG_COLOR_MAP: dict[str, int] = {
     "green": 4, "blue": 5, "purple": 6, "gray": 7,
 }
 _FLAG_COLOR_ORDER = ["red", "orange", "yellow", "green", "blue", "purple", "gray"]
-_FLAG_DEFAULTS = [
-    "Red Flag", "Orange Flag", "Yellow Flag",
-    "Green Flag", "Blue Flag", "Purple Flag", "Gray Flag",
-]
 
 
 def _strip_subject_prefixes(subj: str) -> str:
@@ -1243,84 +1238,6 @@ class MailBridge:
         if result is None:
             return {"success": False, "is_flagged": False}
         return result
-
-    @staticmethod
-    def _flag_names_config_path() -> Path:
-        """Return the path to the MCP server's local flag-names config file."""
-        return Path.home() / ".config" / "apple-mail-mcp" / "flag_names.json"
-
-    def get_flag_names(self) -> list[str]:
-        """Return the 7 custom flag display names.
-
-        Priority:
-          1. Names saved by set_flag_names (stored in ~/.config/apple-mail-mcp/flag_names.json)
-          2. Names set in Mail.app's own preferences (via defaults export)
-          3. Built-in color-name defaults
-
-        Returns a list of 7 strings in order: red, orange, yellow, green, blue, purple, gray.
-        """
-        # 1. Local MCP config file
-        config_path = self._flag_names_config_path()
-        try:
-            if config_path.exists():
-                raw = json.loads(config_path.read_text())
-                if isinstance(raw, list) and len(raw) == 7:
-                    return [str(n) for n in raw]
-        except Exception:
-            pass
-
-        # 2. Mail.app preferences (read-only via defaults export)
-        try:
-            proc = subprocess.run(
-                ["defaults", "export", "com.apple.mail", "-"],
-                capture_output=True,
-                timeout=10,
-            )
-            if proc.returncode == 0:
-                data = plistlib.loads(proc.stdout)
-                names = data.get("FlagNames")
-                if isinstance(names, list) and len(names) == 7:
-                    return [str(n) for n in names]
-        except Exception:
-            pass
-
-        # 3. Built-in defaults
-        return list(_FLAG_DEFAULTS)
-
-    def set_flag_names(self, updates: dict[str, str]) -> list[str]:
-        """Update custom display names for one or more flag colors.
-
-        Names are saved in ~/.config/apple-mail-mcp/flag_names.json and used
-        by get_email_flag and get_flag_names. This does not change Mail.app's
-        own sidebar labels — to change those, right-click a flag mailbox in
-        Mail.app's sidebar and rename it there.
-
-        Args:
-            updates: Mapping of color name (e.g. "red") to new display name (e.g. "Urgent").
-                     Only the specified colors are changed; others keep their current values.
-
-        Returns:
-            Updated list of 7 names in _FLAG_COLOR_ORDER sequence.
-        """
-        for color in updates:
-            if color not in _FLAG_COLOR_MAP:
-                raise ValueError(
-                    f"Unknown flag color {color!r}. "
-                    f"Valid colors: {', '.join(_FLAG_COLOR_ORDER)}."
-                )
-
-        current = self.get_flag_names()
-        for color, name in updates.items():
-            current[_FLAG_COLOR_ORDER.index(color)] = name
-
-        config_path = self._flag_names_config_path()
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            config_path.write_text(json.dumps(current))
-        except OSError as exc:
-            raise RuntimeError(f"Failed to save flag names: {exc}") from exc
-
-        return current
 
     # ------------------------------------------------------------------
     # Private helpers

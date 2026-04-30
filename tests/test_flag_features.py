@@ -1,10 +1,10 @@
 """
-End-to-end tests for the flag management feature (v0.3.0).
+End-to-end tests for the flag management feature.
 
 Tests are split into two groups:
 
   Group A — Static tests (no Mail.app required)
-    Model structure, input validation, flag name persistence.
+    Model structure, input validation.
     These always run.
 
   Group B — Live JXA tests (requires responsive Mail.app)
@@ -17,7 +17,6 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 import tempfile
@@ -73,17 +72,10 @@ def not_none(v, msg=""):
 
 
 FLAG_COLORS  = ["red", "orange", "yellow", "green", "blue", "purple", "gray"]
-CONFIG_PATH  = Path.home() / ".config" / "apple-mail-mcp" / "flag_names.json"
 
 BRIDGE       = None
 FLAGGED_ID:   Optional[int] = None
 UNFLAGGED_ID: Optional[int] = None
-
-
-def _backup(): return CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None
-def _restore(s):
-    if s is None: CONFIG_PATH.unlink(missing_ok=True)
-    else: CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True); CONFIG_PATH.write_text(s)
 
 
 # ---------------------------------------------------------------------------
@@ -142,16 +134,15 @@ def setup() -> bool:
 @test("A", "Models / FlagStatus has required fields")
 def _():
     from src.apple_mail_mcp.models import FlagStatus
-    f = FlagStatus(message_id=1, is_flagged=True, flag_color="red", flag_name="Urgent")
-    eq(f.message_id, 1); eq(f.is_flagged, True)
-    eq(f.flag_color, "red"); eq(f.flag_name, "Urgent")
+    f = FlagStatus(message_id=1, is_flagged=True, flag_color="red")
+    eq(f.message_id, 1); eq(f.is_flagged, True); eq(f.flag_color, "red")
 
 
-@test("A", "Models / FlagStatus accepts None flag_color and flag_name")
+@test("A", "Models / FlagStatus accepts None flag_color")
 def _():
     from src.apple_mail_mcp.models import FlagStatus
     f = FlagStatus(message_id=5, is_flagged=False)
-    is_none(f.flag_color); is_none(f.flag_name)
+    is_none(f.flag_color)
 
 
 @test("A", "Models / FlagResult has required fields")
@@ -166,16 +157,6 @@ def _():
     from src.apple_mail_mcp.models import FlagResult
     f = FlagResult(message_id=3, success=True)
     is_none(f.flag_color)
-
-
-@test("A", "Models / FlagNames has all 7 color fields")
-def _():
-    from src.apple_mail_mcp.models import FlagNames
-    f = FlagNames(red="R", orange="O", yellow="Y", green="G",
-                  blue="B", purple="P", gray="Gr")
-    for color, val in [("red","R"),("orange","O"),("yellow","Y"),("green","G"),
-                       ("blue","B"),("purple","P"),("gray","Gr")]:
-        eq(getattr(f, color), val, color)
 
 
 @test("A", "Models / EmailDetail has flag_color field")
@@ -219,7 +200,6 @@ def _():
 
     class _FakeBridge:
         def set_flag(self, *a, **kw): return {"success": True, "is_flagged": True}
-        def get_flag_names(self): return ["Red Flag"]*7
         def get_flag(self, *a): return {"is_flagged": True, "flag_color": "red"}
     server._bridge = _FakeBridge()
     try:
@@ -229,157 +209,6 @@ def _():
         assert "chartreuse" in str(exc).lower() or "invalid" in str(exc).lower(), str(exc)
     finally:
         server._bridge = BRIDGE  # restore
-
-
-@test("A", "Validation / set_flag_names updates only specified colors via server layer")
-def _():
-    from src.apple_mail_mcp import server
-    from src.apple_mail_mcp.applescript import MailBridge
-
-    class _FakeBridge:
-        def get_flag_names(self): return ["Red Flag","Orange Flag","Yellow Flag",
-                                          "Green Flag","Blue Flag","Purple Flag","Gray Flag"]
-        def set_flag_names(self, updates):
-            names = self.get_flag_names()
-            for c, n in updates.items():
-                from src.apple_mail_mcp.applescript import _FLAG_COLOR_ORDER
-                names[_FLAG_COLOR_ORDER.index(c)] = n
-            return names
-
-    server._bridge = _FakeBridge()
-    result = server.set_flag_names(red="Urgent")
-    eq(result.red, "Urgent")
-    eq(result.orange, "Orange Flag")
-    server._bridge = BRIDGE
-
-
-# ---------------------------------------------------------------------------
-# A3: Flag name persistence (reads/writes local JSON — no JXA)
-# ---------------------------------------------------------------------------
-
-@test("A", "Flag names / get_flag_names returns 7 defaults when no config")
-def _():
-    from src.apple_mail_mcp.applescript import MailBridge, _FLAG_DEFAULTS
-    saved = _backup()
-    try:
-        CONFIG_PATH.unlink(missing_ok=True)
-        bridge = object.__new__(MailBridge)
-        bridge._message_cache = {}
-        bridge._nonempty_mailboxes = set()
-        names = bridge.get_flag_names()
-        eq(len(names), 7)
-        for n in names:
-            assert "Flag" in n, f"Default name should contain 'Flag': {n!r}"
-    finally:
-        _restore(saved)
-
-
-@test("A", "Flag names / set_flag_names persists to config file")
-def _():
-    from src.apple_mail_mcp.applescript import MailBridge
-    saved = _backup()
-    try:
-        CONFIG_PATH.unlink(missing_ok=True)
-        bridge = object.__new__(MailBridge)
-        bridge._message_cache = {}
-        bridge._nonempty_mailboxes = set()
-        bridge.set_flag_names({"red": "Urgent"})
-        assert CONFIG_PATH.exists(), "Config file should be created"
-        data = json.loads(CONFIG_PATH.read_text())
-        eq(data[0], "Urgent", "red (index 0) should be 'Urgent'")
-    finally:
-        _restore(saved)
-
-
-@test("A", "Flag names / get_flag_names reads back what set_flag_names wrote")
-def _():
-    from src.apple_mail_mcp.applescript import MailBridge
-    saved = _backup()
-    try:
-        CONFIG_PATH.unlink(missing_ok=True)
-        bridge = object.__new__(MailBridge)
-        bridge._message_cache = {}
-        bridge._nonempty_mailboxes = set()
-        bridge.set_flag_names({"red": "Urgent", "green": "Done"})
-        names = bridge.get_flag_names()
-        eq(names[0], "Urgent"); eq(names[3], "Done")
-        eq(names[1], "Orange Flag")  # unchanged default
-    finally:
-        _restore(saved)
-
-
-@test("A", "Flag names / partial update preserves other names")
-def _():
-    from src.apple_mail_mcp.applescript import MailBridge
-    saved = _backup()
-    try:
-        CONFIG_PATH.unlink(missing_ok=True)
-        bridge = object.__new__(MailBridge)
-        bridge._message_cache = {}
-        bridge._nonempty_mailboxes = set()
-        bridge.set_flag_names({"red": "Urgent", "orange": "Review", "yellow": "Waiting",
-                               "green": "Done",  "blue": "Info", "purple": "Personal",
-                               "gray": "Archive"})
-        before = bridge.get_flag_names()
-        bridge.set_flag_names({"blue": "FYI"})  # only update blue
-        after = bridge.get_flag_names()
-        eq(after[4], "FYI", "blue should be 'FYI'")
-        for i in [0, 1, 2, 3, 5, 6]:
-            eq(after[i], before[i], f"Index {i} should be unchanged")
-    finally:
-        _restore(saved)
-
-
-@test("A", "Flag names / config file takes priority over Mail.app defaults")
-def _():
-    from src.apple_mail_mcp.applescript import MailBridge
-    saved = _backup()
-    try:
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(json.dumps(
-            ["A","B","C","D","E","F","G"]
-        ))
-        bridge = object.__new__(MailBridge)
-        bridge._message_cache = {}
-        bridge._nonempty_mailboxes = set()
-        names = bridge.get_flag_names()
-        eq(names, ["A","B","C","D","E","F","G"])
-    finally:
-        _restore(saved)
-
-
-@test("A", "Flag names / set_flag_names accepts all 7 color keys")
-def _():
-    from src.apple_mail_mcp.applescript import MailBridge, _FLAG_COLOR_ORDER
-    saved = _backup()
-    try:
-        CONFIG_PATH.unlink(missing_ok=True)
-        bridge = object.__new__(MailBridge)
-        bridge._message_cache = {}
-        bridge._nonempty_mailboxes = set()
-        full = {c: c.capitalize() for c in FLAG_COLORS}
-        result = bridge.set_flag_names(full)
-        eq(len(result), 7)
-        for i, c in enumerate(_FLAG_COLOR_ORDER):
-            eq(result[i], c.capitalize(), c)
-    finally:
-        _restore(saved)
-
-
-@test("A", "Flag names / empty update returns current names")
-def _():
-    from src.apple_mail_mcp.applescript import MailBridge
-    saved = _backup()
-    try:
-        CONFIG_PATH.unlink(missing_ok=True)
-        bridge = object.__new__(MailBridge)
-        bridge._message_cache = {}
-        bridge._nonempty_mailboxes = set()
-        before = bridge.get_flag_names()
-        result = bridge.set_flag_names({})
-        eq(result, before)
-    finally:
-        _restore(saved)
 
 
 # ===========================================================================
@@ -506,22 +335,6 @@ def _():
         BRIDGE.set_flag(FLAGGED_ID, orig)
 
 
-@test("B", "get_email_flag / flag_name reflects custom config")
-def _():
-    if FLAGGED_ID is None: raise AssertionError("No flagged message fixture")
-    from src.apple_mail_mcp import server
-    server._bridge = BRIDGE
-    saved = _backup()
-    orig_color = BRIDGE.get_flag(FLAGGED_ID)["flag_color"] or "red"
-    try:
-        BRIDGE.set_flag_names({orig_color: "MyLabel"})
-        r = server.get_email_flag(FLAGGED_ID)
-        eq(r.flag_name, "MyLabel")
-        eq(r.flag_color, orig_color)
-    finally:
-        _restore(saved)
-
-
 @test("B", "get_email / EmailDetail.flag_color set for flagged message")
 def _():
     if FLAGGED_ID is None: raise AssertionError("No flagged message fixture")
@@ -570,7 +383,7 @@ def print_results(jxa_available: bool) -> int:
     W = 74
     print()
     print("=" * W)
-    print("  FLAG FEATURE TESTS  —  Apple Mail MCP v0.3.0")
+    print("  FLAG FEATURE TESTS  —  Apple Mail MCP")
     print("=" * W)
 
     for grp_key in ["A", "B"]:
@@ -618,7 +431,6 @@ def print_results(jxa_available: bool) -> int:
             ("set_email_flag", "restore 252366 to red",        "flag_color confirmed 'red' after restore"),
             ("set_email_flag", "change 252366 to purple",      "flag_color confirmed 'purple', success=True"),
             ("set_email_flag", "remove flag (None)",           "is_flagged=False, flag_color=None"),
-            ("set_flag_names", "rename red='Urgent'",          "get_email_flag returned flag_name='Urgent'"),
             ("get_email",      "EmailDetail.flag_color",       "flag_color='red' for flagged message"),
             ("search_emails",  "flagged_only=True",            "all returned messages had is_flagged=True"),
         ]

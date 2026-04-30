@@ -4,9 +4,9 @@
 
   "name": "apple-mail",
   "display_name": "Apple Mail",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Access Apple Mail on macOS — search emails, read messages, manage flags, create drafts, list attachments, and view threads via Mail.app's scripting interface.",
-  "long_description": "Connects Claude to Apple Mail on your Mac via Mail.app's native scripting interface. No database access or special permissions needed.\n\n**Features:**\n- Search emails by subject, sender, date range, flags, and attachments\n- Read full message bodies (plain text and HTML)\n- View email threads / conversations\n- List and retrieve attachments\n- Browse all mailboxes and accounts\n- Create draft emails (saved to Drafts with a link to open in Mail.app)\n- Set, change, or remove email flags (7 colors: red, orange, yellow, green, blue, purple, gray)\n- Customize flag display names (e.g. rename \"Red Flag\" to \"Urgent\")\n\n**Requirements:**\n- macOS 13 Ventura or later\n- Apple Mail running\n- Automation permission (macOS prompts automatically on first use)",
+  "long_description": "Connects Claude to Apple Mail on your Mac via Mail.app's native scripting interface. No database access or special permissions needed.\n\n**Features:**\n- Search emails by subject, sender, date range, flags, and attachments\n- Read full message bodies (plain text and HTML)\n- View email threads / conversations\n- List and retrieve attachments\n- Browse all mailboxes and accounts\n- Create draft emails (saved to Drafts with a link to open in Mail.app)\n- Set, change, or remove email flags (7 colors: red, orange, yellow, green, blue, purple, gray)\n\n**Requirements:**\n- macOS 13 Ventura or later\n- Apple Mail running\n- Automation permission (macOS prompts automatically on first use)",
 
   "author": {
     "name": "Brad"
@@ -40,10 +40,8 @@
     { "name": "list_email_attachments", "description": "List all attachments for a specific email" },
     { "name": "get_email_attachment",   "description": "Retrieve an attachment as base64-encoded data" },
     { "name": "create_email_draft",     "description": "Create a draft email in Mail.app and return a message:// link to open it" },
-    { "name": "get_email_flag",         "description": "Get the flag status, color, and custom display name for an email" },
-    { "name": "set_email_flag",         "description": "Set or remove a color flag on an email (red/orange/yellow/green/blue/purple/gray, or null to remove)" },
-    { "name": "get_flag_names",         "description": "Get the custom display names for all 7 Apple Mail flag colors" },
-    { "name": "set_flag_names",         "description": "Set custom display names for flag colors used by get_email_flag (e.g. rename red to 'Urgent')" }
+    { "name": "get_email_flag",         "description": "Get the flag status and color for an email" },
+    { "name": "set_email_flag",         "description": "Set or remove a color flag on an email (red/orange/yellow/green/blue/purple/gray, or null to remove)" }
   ],
 
   "keywords": ["apple", "mail", "email", "macos", "search", "attachments", "inbox", "draft", "compose"],
