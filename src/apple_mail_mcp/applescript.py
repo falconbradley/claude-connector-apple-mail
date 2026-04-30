@@ -33,13 +33,19 @@ logger = logging.getLogger("apple_mail_mcp.applescript")
 
 _RE_PREFIX = re.compile(r"^(Re|Fwd|Fw)\s*:\s*", re.IGNORECASE)
 
-# Flag color name → flagIndex integer (0 = no flag, 1–7 = red … gray).
-# Confirmed via JXA probe: msg.flagIndex() returns 1 for a red-flagged message.
+# Flag color name → flagIndex integer (-1 = no flag, 1–7 = red … gray).
+# Reads return 1–7 for the seven Mail.app flag colors. Writes are accepted for
+# 1–6, but Mail.app's AppleScript setter rejects flagIndex=7 ("gray") with
+# "AppleEvent handler failed" — confirmed in both JXA and AppleScript, with no
+# workaround (transition through 6, post-unflag, rule action, type coercion all
+# fail the same way). Mail.app's internal -setFlagColor: would handle gray, but
+# scripting only exposes the older setter that predates the gray addition.
 _FLAG_COLOR_MAP: dict[str, int] = {
     "red": 1, "orange": 2, "yellow": 3,
     "green": 4, "blue": 5, "purple": 6, "gray": 7,
 }
 _FLAG_COLOR_ORDER = ["red", "orange", "yellow", "green", "blue", "purple", "gray"]
+_FLAG_COLOR_WRITE_BLOCKED = {"gray"}
 
 
 def _strip_subject_prefixes(subj: str) -> str:
@@ -1373,7 +1379,18 @@ class MailBridge:
 
         Returns:
             {"success": bool, "is_flagged": bool}
+
+        Raises:
+            NotImplementedError: when ``flag="gray"``. Mail.app's scripting API
+                rejects flagIndex=7; see ``_FLAG_COLOR_MAP`` for details.
         """
+        if flag in _FLAG_COLOR_WRITE_BLOCKED:
+            raise NotImplementedError(
+                f"Mail.app's scripting API does not support setting the {flag!r} "
+                "flag — this is a Mail.app limitation, not a bug in this connector. "
+                "Reading the gray flag works; only writing it via AppleScript/JXA "
+                "fails. Set this flag manually via Mail's UI."
+            )
         location = self._find_message(message_id)
         if location is None:
             raise ValueError(f"Message {message_id} not found.")

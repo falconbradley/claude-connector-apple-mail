@@ -77,6 +77,10 @@ logger = logging.getLogger("apple_mail_mcp")
 _bridge: Optional[MailBridge] = None
 
 _VALID_FLAG_COLORS = frozenset({"red", "orange", "yellow", "green", "blue", "purple", "gray"})
+# "gray" is recognized by get_email_flag (Mail.app reads flagIndex=7 fine) but
+# Mail.app's scripting API rejects writes — keep it out of the writable set so
+# set_email_flag returns a clear, actionable error instead of a low-level one.
+_WRITABLE_FLAG_COLORS = _VALID_FLAG_COLORS - {"gray"}
 
 # ---------------------------------------------------------------------------
 # FastMCP app
@@ -472,19 +476,34 @@ def set_email_flag(
     Args:
         message_id: The integer ID from search_emails results.
         flag: Flag color to set: "red", "orange", "yellow", "green", "blue",
-              "purple", or "gray". Pass null/None to remove the flag.
+              or "purple". Pass null/None to remove the flag.
+
+    Note:
+        "gray" is read-only. Mail.app's scripting API rejects writes to the
+        gray flag (flagIndex=7) — this is a Mail.app limitation, not a bug
+        in this connector. ``get_email_flag`` reads gray correctly, but
+        passing ``flag="gray"`` here raises a ValueError. The user must set
+        the gray flag manually via Mail.app's UI.
     """
     if flag is not None and flag not in _VALID_FLAG_COLORS:
         raise ValueError(
             f"Invalid flag color {flag!r}. "
             f"Choose from: {', '.join(sorted(_VALID_FLAG_COLORS))}, or null to remove."
         )
+    if flag is not None and flag not in _WRITABLE_FLAG_COLORS:
+        raise ValueError(
+            f"Cannot set flag color {flag!r}: Mail.app's scripting API rejects "
+            f"writes to this color (known Mail.app limitation, not a bug in this "
+            f"connector). Reading {flag!r} flags works fine via get_email_flag, "
+            f"but to set this color the user must use Mail.app's UI directly. "
+            f"Writable colors: {', '.join(sorted(_WRITABLE_FLAG_COLORS))}."
+        )
     bridge = _require_bridge()
     result = bridge.set_flag(message_id, flag)
     if not result.get("success"):
         raise RuntimeError(f"Failed to set flag on message {message_id}.")
-    # Use the color_index read back from Mail.app — if the boolean fallback fired,
-    # the actual color may differ from what was requested (always red in that case).
+    # Use the color_index read back from Mail.app — the actual stored color
+    # is the source of truth for what the user will see in Mail's UI.
     actual_color: Optional[str] = None
     color_index = result.get("color_index", -1)
     if isinstance(color_index, int) and 1 <= color_index <= 7:
