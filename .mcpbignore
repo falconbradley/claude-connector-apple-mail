@@ -25,5 +25,9 @@ Thumbs.db
 # Claude config (not part of the extension)
 .claude/
 
+# Kangentic (local AI workflow tool — sessions can contain conversation history)
+.kangentic/
+kangentic.json
+
 # Old install script (replaced by mcpb install flow)
 install.sh
