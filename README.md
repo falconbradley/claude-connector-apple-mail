@@ -20,10 +20,8 @@ Packaged as an [MCPB desktop extension](https://support.claude.com/en/articles/1
 | `list_email_attachments` | Enumerate attachments for any email |
 | `get_email_attachment` | Retrieve attachment content (base64) |
 | `create_email_draft` | Create a draft email saved to Mail.app's Drafts mailbox, returns a `message://` link to open it |
-| `get_email_flag` | Get the flag status, color (e.g. `"orange"`), and custom display name for an email |
+| `get_email_flag` | Get the flag status and color (e.g. `"orange"`) for an email |
 | `set_email_flag` | Set or remove a color flag on an email (red/orange/yellow/green/blue/purple/gray, or null to remove) |
-| `get_flag_names` | Get the current display names for all 7 Apple Mail flag colors |
-| `set_flag_names` | Set custom display names for flag colors (e.g. rename red to `"Urgent"`) |
 
 ## How it works
 
@@ -106,7 +104,6 @@ Once installed, just ask Claude naturally:
 - *"Create a draft email to the team announcing Friday's meeting"*
 - *"Flag this email as orange"*
 - *"What color is the flag on that email from Sarah?"*
-- *"Rename the red flag to 'Urgent' and the green flag to 'Done'"*
 
 ---
 
@@ -176,7 +173,6 @@ Times measured against ~61K messages across 7 mailboxes. Searches without option
 **Phase 2 — Write (in progress)**
 - [x] Create draft emails (saved to Drafts with a `message://` link to open)
 - [x] Set, change, or remove color flags on emails
-- [x] Customize flag display names (e.g. rename "Red Flag" to "Urgent")
 - [ ] Mark as read / unread
 - [ ] Move to folder
 - [ ] Delete (move to Trash)

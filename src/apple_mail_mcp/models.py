@@ -84,20 +84,9 @@ class FlagStatus(BaseModel):
     message_id: int
     is_flagged: bool
     flag_color: Optional[str] = None  # None when unflagged; e.g. "red", "orange"
-    flag_name: Optional[str] = None   # Custom display name (e.g. "Urgent"), or None
 
 
 class FlagResult(BaseModel):
     message_id: int
     flag_color: Optional[str] = None  # None = unflagged
     success: bool
-
-
-class FlagNames(BaseModel):
-    red: str
-    orange: str
-    yellow: str
-    green: str
-    blue: str
-    purple: str
-    gray: str
