@@ -20,6 +20,7 @@ Packaged as an [MCPB desktop extension](https://support.claude.com/en/articles/1
 | `list_email_attachments` | Enumerate attachments for any email |
 | `get_email_attachment` | Retrieve attachment content (base64) |
 | `create_email_draft` | Create a draft email saved to Mail.app's Drafts mailbox, returns a `message://` link to open it |
+| `create_email_reply_draft` | Reply to an existing message — preserves `In-Reply-To`/`References` headers so the reply threads correctly in the recipient's client |
 | `get_email_flag` | Get the flag status and color (e.g. `"orange"`) for an email |
 | `set_email_flag` | Set or remove a color flag on an email (red/orange/yellow/green/blue/purple/gray, or null to remove) |
 
@@ -101,6 +102,7 @@ Once installed, just ask Claude naturally:
 - *"Summarise the email thread about the contract renewal"*
 - *"Find flagged emails with PDF attachments"*
 - *"Draft a reply to John's email about the project update"*
+- *"Reply-all to that thread saying I'll review by EOD"*
 - *"Create a draft email to the team announcing Friday's meeting"*
 - *"Flag this email as orange"*
 - *"What color is the flag on that email from Sarah?"*
@@ -172,6 +174,7 @@ Times measured against ~61K messages across 7 mailboxes. Searches without option
 
 **Phase 2 — Write (in progress)**
 - [x] Create draft emails (saved to Drafts with a `message://` link to open)
+- [x] Reply to a thread (preserves `In-Reply-To`/`References` headers)
 - [x] Set, change, or remove color flags on emails
 - [ ] Mark as read / unread
 - [ ] Move to folder

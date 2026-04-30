@@ -1127,6 +1127,191 @@ class MailBridge:
             return {"success": False, "message_id": None}
         return result
 
+    def create_reply_draft(
+        self,
+        message_id: int,
+        body: str,
+        *,
+        reply_all: bool = False,
+        cc_addresses: list[str] | None = None,
+        bcc_addresses: list[str] | None = None,
+        include_quoted: bool = True,
+    ) -> dict:
+        """Create a reply draft to an existing message via Mail.app's native reply command.
+
+        Mail.app's `reply` command sets the In-Reply-To and References headers
+        and pre-populates the recipient list and "Re: ..." subject — none of
+        which we can do reliably by constructing an OutgoingMessage from
+        scratch. The user's body is prepended to Mail's auto-generated quoted
+        block when include_quoted=True; otherwise it replaces the content.
+
+        Returns:
+            {"success": bool, "message_id": str | None, "subject": str | None,
+             "to_addresses": list[str], "cc_addresses": list[str]}
+            message_id is the RFC 2822 Message-ID for the saved draft (typically
+            None until the draft is sent — same as create_draft).
+        """
+        location = self._find_message(message_id)
+        if location is None:
+            raise ValueError(f"Message {message_id} not found.")
+
+        acct_name, mbox_name, _ = location
+        safe_acct = _js_escape(acct_name)
+        safe_mbox = _js_escape(mbox_name)
+        safe_body = _js_escape(body)
+        reply_all_js = "true" if reply_all else "false"
+        include_quoted_js = "true" if include_quoted else "false"
+
+        def recip_js(kind: str, addrs: list[str]) -> str:
+            cls_map = {"cc": "CcRecipient", "bcc": "BccRecipient"}
+            field_map = {"cc": "ccRecipients", "bcc": "bccRecipients"}
+            cls = cls_map[kind]
+            field = field_map[kind]
+            lines = []
+            for addr in addrs:
+                name, email = _parse_address(addr)
+                lines.append(
+                    f'draft.{field}.push('
+                    f'mail.{cls}({{address: "{_js_escape(email)}", name: "{_js_escape(name)}"}}'
+                    f'));'
+                )
+            return "\n        ".join(lines)
+
+        extra_cc_js = recip_js("cc", cc_addresses or [])
+        extra_bcc_js = recip_js("bcc", bcc_addresses or [])
+
+        script = f"""
+        (function() {{
+            var mail = Application("Mail");
+            var accounts = mail.accounts.whose({{name: "{safe_acct}"}});
+            if (accounts.length === 0) return JSON.stringify({{"success": false, "error": "account not found"}});
+            var acct = accounts[0];
+            var mboxes = acct.mailboxes.whose({{name: "{safe_mbox}"}});
+            if (mboxes.length === 0) return JSON.stringify({{"success": false, "error": "mailbox not found"}});
+            var mb = mboxes[0];
+            var msgs = mb.messages.whose({{id: {message_id}}});
+            if (msgs.length === 0) return JSON.stringify({{"success": false, "error": "message not found"}});
+            var src = msgs[0];
+
+            var createdAfter = new Date();
+
+            // Mail's native reply: sets In-Reply-To/References, To/Cc, and "Re:" subject.
+            mail.reply(src, {{openingWindow: false, replyToAll: {reply_all_js}}});
+
+            // Mail.app populates the auto-quoted body asynchronously after reply
+            // returns. ~1 s is sufficient on modern hardware.
+            delay(1.0);
+
+            // Find the freshly-created outgoing message: scan from the end and
+            // pick the first "Re:..." we haven't seen before by matching subject
+            // against the source message.
+            var srcSubject = "";
+            try {{ srcSubject = src.subject() || ""; }} catch(e) {{}}
+            var expectedSubject = "Re: " + srcSubject.replace(/^Re:\\s*/i, "");
+            var draft = null;
+            var outs = mail.outgoingMessages();
+            for (var k = outs.length - 1; k >= 0; k--) {{
+                try {{
+                    var s = outs[k].subject() || "";
+                    if (s === expectedSubject || s === "Re: " + srcSubject) {{
+                        draft = outs[k];
+                        break;
+                    }}
+                }} catch(e) {{}}
+            }}
+            if (!draft) return JSON.stringify({{"success": false, "error": "reply outgoing message not found"}});
+
+            // Capture the auto-populated recipients and the auto-quoted body.
+            var subj = "";
+            try {{ subj = draft.subject() || ""; }} catch(e) {{}}
+            var toAddrs = [];
+            try {{
+                var to = draft.toRecipients();
+                for (var m = 0; m < to.length; m++) {{
+                    var addr = to[m].address();
+                    var nm = to[m].name();
+                    toAddrs.push(nm ? (nm + " <" + addr + ">") : addr);
+                }}
+            }} catch(e) {{}}
+            var ccAddrs = [];
+            try {{
+                var cc = draft.ccRecipients();
+                for (var m = 0; m < cc.length; m++) {{
+                    var addr = cc[m].address();
+                    var nm = cc[m].name();
+                    ccAddrs.push(nm ? (nm + " <" + addr + ">") : addr);
+                }}
+            }} catch(e) {{}}
+
+            var quoted = "";
+            try {{ quoted = draft.content() || ""; }} catch(e) {{}}
+
+            // Prepend user body. include_quoted=false replaces the auto-quoted block.
+            var newBody;
+            if ({include_quoted_js}) {{
+                newBody = "{safe_body}\\n\\n" + quoted;
+            }} else {{
+                newBody = "{safe_body}";
+            }}
+            try {{ draft.content = newBody; }} catch(e) {{}}
+
+            // Push extra cc/bcc on top of what reply pre-populated.
+            {extra_cc_js}
+            {extra_bcc_js}
+
+            draft.save();
+
+            // Message-ID is typically null on save (only assigned at send time),
+            // so the fallback below is the real code path.
+            var msgId = null;
+            try {{ msgId = draft.messageId(); }} catch(e) {{}}
+
+            if (!msgId) {{
+                // Allow Mail.app a moment to commit the draft to the Drafts mailbox.
+                delay(2.0);
+                var safeSubj = subj;
+                var accts = mail.accounts();
+                outer: for (var i = 0; i < accts.length; i++) {{
+                    var dmboxes = accts[i].mailboxes();
+                    for (var j = 0; j < dmboxes.length; j++) {{
+                        if (dmboxes[j].name().toLowerCase().indexOf("draft") === -1) continue;
+                        try {{
+                            var candidates = dmboxes[j].messages.whose({{subject: safeSubj}});
+                            var latest = -1, latestDate = null;
+                            for (var c = 0; c < candidates.length; c++) {{
+                                var ds = null;
+                                try {{ ds = candidates[c].dateSent(); }} catch(e) {{}}
+                                if (!ds) {{ try {{ ds = candidates[c].dateReceived(); }} catch(e) {{}} }}
+                                if (!ds || ds < createdAfter) continue;
+                                if (!latestDate || ds > latestDate) {{ latestDate = ds; latest = c; }}
+                            }}
+                            if (latest >= 0) {{ try {{ msgId = candidates[latest].messageId(); }} catch(e2) {{}} }}
+                        }} catch(e) {{}}
+                        if (msgId) break outer;
+                    }}
+                }}
+            }}
+
+            return JSON.stringify({{
+                "success": true,
+                "message_id": msgId,
+                "subject": subj,
+                "to_addresses": toAddrs,
+                "cc_addresses": ccAddrs
+            }});
+        }})();
+        """
+        result = self._run_jxa(script, timeout=90)
+        if result is None:
+            return {
+                "success": False,
+                "message_id": None,
+                "subject": None,
+                "to_addresses": [],
+                "cc_addresses": [],
+            }
+        return result
+
     def get_flag(self, message_id: int) -> dict:
         """Return flag status and color index for a message.
 

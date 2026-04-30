@@ -21,6 +21,8 @@ Tools provided
   get_email_attachment   - Download attachment as base64
   get_email_flag        - Flag status and color for a message
   set_email_flag        - Set or remove a color flag on a message
+  create_email_draft    - Compose a brand-new draft and return a link to open it
+  create_email_reply_draft - Reply to an existing message (preserves threading headers)
 
 Requirements
 ------------
@@ -530,6 +532,60 @@ def create_email_draft(
         subject=subject,
         to_addresses=to,
         cc_addresses=cc or [],
+        bcc_addresses=bcc or [],
+        draft_link=_make_mail_link(rfc_id),
+    )
+
+
+@mcp.tool()
+def create_email_reply_draft(
+    message_id: int,
+    body: str,
+    reply_all: bool = False,
+    cc: Optional[list[str]] = None,
+    bcc: Optional[list[str]] = None,
+    include_quoted: bool = True,
+) -> DraftResult:
+    """Create a reply draft to an existing email and return a link to open it.
+
+    Uses Mail.app's native reply command, which sets the In-Reply-To and
+    References headers so the reply threads correctly in the recipient's mail
+    client. The draft is saved to the source account's Drafts mailbox; the
+    returned draft_link is a message:// URL that opens it in Mail.app.
+
+    Args:
+        message_id:     Integer ID of the message being replied to (from search_emails).
+        body:           Plain-text body of the reply. Prepended above the quoted original.
+        reply_all:      If true, populate Cc with the original recipients in addition to
+                        the original sender (defaults to single-recipient reply).
+        cc:             Extra Cc addresses to add on top of what reply-all populated.
+                        Format: ["Name <user@example.com>", "other@example.com"].
+        bcc:            Extra Bcc addresses to add.
+        include_quoted: If true (default), the original message body is quoted below
+                        the reply. Set false for a terse reply with no quoted block.
+    """
+    if not body or not body.strip():
+        raise ValueError("Reply `body` must be a non-empty string.")
+
+    bridge = _require_bridge()
+    result = bridge.create_reply_draft(
+        message_id,
+        body,
+        reply_all=reply_all,
+        cc_addresses=cc,
+        bcc_addresses=bcc,
+        include_quoted=include_quoted,
+    )
+
+    if not result.get("success"):
+        err = result.get("error") or "unknown error"
+        raise RuntimeError(f"Failed to create reply draft in Mail.app: {err}")
+
+    rfc_id = result.get("message_id")
+    return DraftResult(
+        subject=result.get("subject") or "",
+        to_addresses=result.get("to_addresses") or [],
+        cc_addresses=(result.get("cc_addresses") or []) + (cc or []),
         bcc_addresses=bcc or [],
         draft_link=_make_mail_link(rfc_id),
     )
