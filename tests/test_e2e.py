@@ -322,13 +322,10 @@ def _():
 
 @test("A", "Validation / set_email_flag accepts all 7 colors and rejects others")
 def _():
-    from src.apple_mail_mcp.server import _VALID_FLAG_COLORS, _WRITABLE_FLAG_COLORS
+    from src.apple_mail_mcp.server import _VALID_FLAG_COLORS
     for c in FLAG_COLORS:
         is_in(c, _VALID_FLAG_COLORS)
     assert "pink" not in _VALID_FLAG_COLORS
-    # Writable subset excludes gray (Mail.app scripting can't set flagIndex=7).
-    assert "gray" not in _WRITABLE_FLAG_COLORS
-    assert _WRITABLE_FLAG_COLORS == _VALID_FLAG_COLORS - {"gray"}
 
 
 @test("A", "Validation / set_email_flag ValueError mentions the bad color")
@@ -550,21 +547,9 @@ def _():
     # Mail.app needs a beat to commit a flag change before the next read can
     # observe it — a 250 ms throttle isn't always enough. Use 600 ms here.
     set_read_gap = 0.6
-    # Mail.app's scripting API rejects flagIndex=7 ("gray") with "AppleEvent
-    # handler failed" — this is a Mail.app limitation, not a connector bug
-    # (see _FLAG_COLOR_MAP in applescript.py). Iterate every color: the six
-    # writable colors must round-trip; "gray" must raise NotImplementedError.
     try:
         for c in FLAG_COLORS:
             _throttle(set_read_gap)
-            if c == "gray":
-                try:
-                    BRIDGE.set_flag(FLAGGED_ID, c)
-                    raise AssertionError("Expected NotImplementedError for gray")
-                except NotImplementedError as exc:
-                    msg = str(exc).lower()
-                    assert "gray" in msg and "mail.app" in msg, str(exc)
-                continue
             r = BRIDGE.set_flag(FLAGGED_ID, c)
             eq(r["success"], True)
             _throttle(set_read_gap)
@@ -576,51 +561,7 @@ def _():
         eq(info["is_flagged"], False); is_none(info.get("flag_color"))
     finally:
         _throttle()
-        if orig != "gray":
-            BRIDGE.set_flag(FLAGGED_ID, orig)
-
-
-@test("A", "set_email_flag rejects gray with a clear, actionable error")
-def _():
-    from src.apple_mail_mcp import server
-
-    class _FakeBridge:
-        def set_flag(self, message_id, flag=None):
-            raise AssertionError("server should reject gray before calling bridge")
-
-    prev = server._bridge
-    server._bridge = _FakeBridge()
-    try:
-        try:
-            server.set_email_flag(1, "gray")
-            raise AssertionError("Expected ValueError for gray")
-        except ValueError as exc:
-            msg = str(exc).lower()
-            # Error must mention gray, name it as a Mail.app limitation, and
-            # tell the caller what to do (use Mail.app's UI / which colors work).
-            assert "gray" in msg, str(exc)
-            assert "mail.app" in msg, str(exc)
-            assert "ui" in msg or "writable" in msg, str(exc)
-    finally:
-        server._bridge = prev
-
-
-@test("A", "MailBridge.set_flag also raises NotImplementedError for gray (defense in depth)")
-def _():
-    from src.apple_mail_mcp.applescript import MailBridge, _FLAG_COLOR_WRITE_BLOCKED
-
-    class B(MailBridge):
-        def __init__(self): pass
-        def _find_message(self, mid):
-            raise AssertionError("bridge should reject gray before _find_message")
-
-    assert "gray" in _FLAG_COLOR_WRITE_BLOCKED
-    try:
-        B().set_flag(1, "gray")
-        raise AssertionError("Expected NotImplementedError")
-    except NotImplementedError as exc:
-        assert "gray" in str(exc).lower(), str(exc)
-        assert "mail.app" in str(exc).lower(), str(exc)
+        BRIDGE.set_flag(FLAGGED_ID, orig)
 
 
 @test("B", "create_email_draft creates and we can clean up a unique-subject draft")

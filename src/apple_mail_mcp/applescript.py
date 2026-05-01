@@ -33,19 +33,13 @@ logger = logging.getLogger("apple_mail_mcp.applescript")
 
 _RE_PREFIX = re.compile(r"^(Re|Fwd|Fw)\s*:\s*", re.IGNORECASE)
 
-# Flag color name → flagIndex integer (-1 = no flag, 1–7 = red … gray).
-# Reads return 1–7 for the seven Mail.app flag colors. Writes are accepted for
-# 1–6, but Mail.app's AppleScript setter rejects flagIndex=7 ("gray") with
-# "AppleEvent handler failed" — confirmed in both JXA and AppleScript, with no
-# workaround (transition through 6, post-unflag, rule action, type coercion all
-# fail the same way). Mail.app's internal -setFlagColor: would handle gray, but
-# scripting only exposes the older setter that predates the gray addition.
+# Flag color name → flagIndex integer (-1 = no flag, 0–6 = red … gray).
+# Mail.app's flagIndex property is 0-based: 0=red, 1=orange, …, 6=gray.
 _FLAG_COLOR_MAP: dict[str, int] = {
-    "red": 1, "orange": 2, "yellow": 3,
-    "green": 4, "blue": 5, "purple": 6, "gray": 7,
+    "red": 0, "orange": 1, "yellow": 2,
+    "green": 3, "blue": 4, "purple": 5, "gray": 6,
 }
 _FLAG_COLOR_ORDER = ["red", "orange", "yellow", "green", "blue", "purple", "gray"]
-_FLAG_COLOR_WRITE_BLOCKED = {"gray"}
 
 
 def _strip_subject_prefixes(subj: str) -> str:
@@ -103,6 +97,7 @@ class MailBridge:
             var accounts = mail.accounts();
             var mboxes = [];
             for (var i = 0; i < accounts.length; i++) {
+                if (!accounts[i].enabled()) continue;
                 var acctName = accounts[i].name();
                 var mbs = accounts[i].mailboxes();
                 for (var j = 0; j < mbs.length; j++) {
@@ -230,8 +225,11 @@ class MailBridge:
             var totalMessages = 0;
             var unreadMessages = 0;
             var mailboxCount = 0;
+            var enabledAccounts = 0;
 
             for (var i = 0; i < accounts.length; i++) {
+                if (!accounts[i].enabled()) continue;
+                enabledAccounts++;
                 var mboxes = accounts[i].mailboxes();
                 mailboxCount += mboxes.length;
                 for (var j = 0; j < mboxes.length; j++) {
@@ -244,7 +242,7 @@ class MailBridge:
                 "total_messages": totalMessages,
                 "unread_messages": unreadMessages,
                 "mailbox_count": mailboxCount,
-                "account_count": accounts.length
+                "account_count": enabledAccounts
             });
         })();
         """
@@ -271,6 +269,7 @@ class MailBridge:
             var accounts = mail.accounts();
             var result = [];
             for (var i = 0; i < accounts.length; i++) {
+                if (!accounts[i].enabled()) continue;
                 var acctName = accounts[i].name();
                 var mboxes = accounts[i].mailboxes();
                 for (var j = 0; j < mboxes.length; j++) {
@@ -445,6 +444,7 @@ class MailBridge:
             var scanStart = Date.now();
 
             for (var i = 0; i < accounts.length; i++) {{
+                if (!accounts[i].enabled()) continue;
                 var acctName = accounts[i].name();
                 {acct_filter}
                 var mboxes = accounts[i].mailboxes();
@@ -1104,6 +1104,7 @@ class MailBridge:
             if (!msgId) {{
                 var accounts = mail.accounts();
                 outer: for (var i = 0; i < accounts.length; i++) {{
+                    if (!accounts[i].enabled()) continue;
                     var mboxes = accounts[i].mailboxes();
                     for (var j = 0; j < mboxes.length; j++) {{
                         if (mboxes[j].name().toLowerCase().indexOf("draft") === -1) continue;
@@ -1278,6 +1279,7 @@ class MailBridge:
                 var safeSubj = subj;
                 var accts = mail.accounts();
                 outer: for (var i = 0; i < accts.length; i++) {{
+                    if (!accts[i].enabled()) continue;
                     var dmboxes = accts[i].mailboxes();
                     for (var j = 0; j < dmboxes.length; j++) {{
                         if (dmboxes[j].name().toLowerCase().indexOf("draft") === -1) continue;
@@ -1348,9 +1350,9 @@ class MailBridge:
             var msg = msgs[0];
 
             var isFlagged = msg.flaggedStatus() ? true : false;
-            // flagIndex() returns -1 when unflagged, 1-7 for colors.
-            // Fall back to isFlagged ? 1 : -1 if the property is unavailable.
-            var colorIdx = isFlagged ? 1 : -1;
+            // flagIndex() returns -1 when unflagged, 0-6 for colors.
+            // Fall back to isFlagged ? 0 : -1 if the property is unavailable.
+            var colorIdx = isFlagged ? 0 : -1;
             try {{
                 colorIdx = msg.flagIndex();
             }} catch(e) {{}}
@@ -1363,7 +1365,7 @@ class MailBridge:
 
         color_index: int = result.get("color_index", -1)
         flag_color: Optional[str] = (
-            _FLAG_COLOR_ORDER[color_index - 1] if 1 <= color_index <= 7 else None
+            _FLAG_COLOR_ORDER[color_index] if 0 <= color_index <= 6 else None
         )
         return {
             "is_flagged": bool(result.get("is_flagged", False)),
@@ -1379,18 +1381,7 @@ class MailBridge:
 
         Returns:
             {"success": bool, "is_flagged": bool}
-
-        Raises:
-            NotImplementedError: when ``flag="gray"``. Mail.app's scripting API
-                rejects flagIndex=7; see ``_FLAG_COLOR_MAP`` for details.
         """
-        if flag in _FLAG_COLOR_WRITE_BLOCKED:
-            raise NotImplementedError(
-                f"Mail.app's scripting API does not support setting the {flag!r} "
-                "flag — this is a Mail.app limitation, not a bug in this connector. "
-                "Reading the gray flag works; only writing it via AppleScript/JXA "
-                "fails. Set this flag manually via Mail's UI."
-            )
         location = self._find_message(message_id)
         if location is None:
             raise ValueError(f"Message {message_id} not found.")
@@ -1398,7 +1389,7 @@ class MailBridge:
         acct_name, mbox_name, _ = location
         safe_acct = _js_escape(acct_name)
         safe_mbox = _js_escape(mbox_name)
-        # color_index: 1-7 = set color, -1/None = unflag via flaggedStatus = false
+        # color_index: 0-6 = set color, -1/None = unflag via flaggedStatus = false
         color_index = _FLAG_COLOR_MAP[flag] if flag is not None else -1
 
         script = f"""
@@ -1416,22 +1407,22 @@ class MailBridge:
             var msg = msgs[0];
 
             var colorIdx = {color_index};
-            if (colorIdx < 1) {{
+            if (colorIdx < 0) {{
                 // Unflag: flaggedStatus = false sets flagIndex to -1
                 msg.flaggedStatus = false;
             }} else {{
-                // Set specific color via flagIndex (confirmed in JXA probe)
+                // Set specific color via flagIndex (0-based, confirmed in JXA probe)
                 try {{
                     msg.flagIndex = colorIdx;
                 }} catch(e) {{
-                    // Fallback: boolean flag (always red)
+                    // Fallback: boolean flag (always red / index 0)
                     msg.flaggedStatus = true;
                 }}
             }}
 
             var isFlagged = msg.flaggedStatus() ? true : false;
             // Read back the actual flag index so the caller knows the true resulting color.
-            var actualIdx = isFlagged ? 1 : -1;
+            var actualIdx = isFlagged ? 0 : -1;
             try {{ actualIdx = msg.flagIndex(); }} catch(e) {{}}
             return JSON.stringify({{success: true, is_flagged: isFlagged, color_index: actualIdx}});
         }})();
@@ -1473,6 +1464,7 @@ class MailBridge:
             var accounts = mail.accounts();
             {nonempty_set_js}
             for (var i = 0; i < accounts.length; i++) {{
+                if (!accounts[i].enabled()) continue;
                 var acctName = accounts[i].name();
                 var mboxes = accounts[i].mailboxes();
                 for (var j = 0; j < mboxes.length; j++) {{

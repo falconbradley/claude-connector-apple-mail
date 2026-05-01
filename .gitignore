@@ -30,3 +30,6 @@ Thumbs.db
 
 # uv
 uv.lock
+.kangentic/
+.claude/settings.local.json
+kangentic.local.json
