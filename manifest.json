@@ -4,9 +4,9 @@
 
   "name": "apple-mail",
   "display_name": "Apple Mail",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Access Apple Mail on macOS — search emails, read messages, manage flags, create drafts, list attachments, and view threads via Mail.app's scripting interface.",
-  "long_description": "Connects Claude to Apple Mail on your Mac via Mail.app's native scripting interface. No database access or special permissions needed.\n\n**Features:**\n- Search emails by subject, sender, date range, flags, and attachments\n- Read full message bodies (plain text and HTML)\n- View email threads / conversations\n- List and retrieve attachments\n- Browse all mailboxes and accounts\n- Create draft emails (saved to Drafts with a link to open in Mail.app)\n- Reply to existing emails with proper threading headers\n- Set, change, or remove email flags (6 writable colors: red, orange, yellow, green, blue, purple; gray is readable but not writable due to a Mail.app scripting limitation)\n\n**Requirements:**\n- macOS 13 Ventura or later\n- Apple Mail running\n- Automation permission (macOS prompts automatically on first use)",
+  "long_description": "Connects Claude to Apple Mail on your Mac via Mail.app's native scripting interface. No database access or special permissions needed.\n\n**Features:**\n- Search emails by subject, sender, date range, flags, and attachments\n- Read full message bodies (plain text and HTML)\n- View email threads / conversations\n- List and retrieve attachments\n- Browse all mailboxes and accounts\n- Create draft emails (saved to Drafts with a link to open in Mail.app)\n- Reply to existing emails with proper threading headers\n- Set, change, or remove email flags (all 7 colors: red, orange, yellow, green, blue, purple, gray)\n\n**Requirements:**\n- macOS 13 Ventura or later\n- Apple Mail running\n- Automation permission (macOS prompts automatically on first use)",
 
   "author": {
     "name": "Brad"

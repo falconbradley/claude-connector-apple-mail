@@ -22,7 +22,7 @@ Packaged as an [MCPB desktop extension](https://support.claude.com/en/articles/1
 | `create_email_draft` | Create a draft email saved to Mail.app's Drafts mailbox, returns a `message://` link to open it |
 | `create_email_reply_draft` | Reply to an existing message — preserves `In-Reply-To`/`References` headers so the reply threads correctly in the recipient's client |
 | `get_email_flag` | Get the flag status and color (e.g. `"orange"`) for an email |
-| `set_email_flag` | Set or remove a color flag on an email (red/orange/yellow/green/blue/purple, or null to remove). Note: gray is read-only — see [Limitations](#limitations) |
+| `set_email_flag` | Set or remove a color flag on an email (red/orange/yellow/green/blue/purple/gray, or null to remove) |
 
 ## How it works
 
@@ -189,12 +189,6 @@ Times measured against ~61K messages across 7 mailboxes. Searches without option
 - Only requires Automation permission, not Full Disk Access.
 - macOS-only (`"platforms": ["darwin"]` in manifest).
 - Attachment data is returned as base64 only when explicitly requested.
-
----
-
-## Limitations
-
-**Gray flag is read-only.** `get_email_flag` returns `"gray"` correctly for any message flagged gray via Mail.app's UI, but `set_email_flag` cannot *set* the gray flag — Mail.app's scripting API rejects writes to `flagIndex=7` with "AppleEvent handler failed". This is a Mail.app limitation, not a bug in this connector: confirmed across both AppleScript and JXA, with no scripting workaround. The other six colors (red, orange, yellow, green, blue, purple) all work for both reading and writing. To set the gray flag, use Mail.app's UI directly.
 
 ---
 
