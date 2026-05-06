@@ -175,13 +175,16 @@ def setup() -> bool:
     # enough to find at least one of each fixture type for an active user.
     since_recent = datetime.now(timezone.utc) - timedelta(days=90)
 
-    _, flagged = BRIDGE.search_messages(is_flagged=True, limit=1)  # flags often pre-date 90d
+    # Restrict fixtures to INBOX mailboxes — searching all mailboxes can pick
+    # up Drafts (e.g. one our own reply test created), and replying to a draft
+    # message is undefined behavior in Mail.app and hangs the AppleScript.
+    _, flagged = BRIDGE.search_messages(mailbox_name="INBOX", is_flagged=True, limit=1)  # flags often pre-date 90d
     if flagged: FLAGGED_ID = flagged[0]["id"]
-    _, unflagged = BRIDGE.search_messages(is_flagged=False, since=since_recent, limit=1)
+    _, unflagged = BRIDGE.search_messages(mailbox_name="INBOX", is_flagged=False, since=since_recent, limit=1)
     if unflagged:
         UNFLAGGED_ID = unflagged[0]["id"]
         RECENT_ID = unflagged[0]["id"]   # reuse for recent
-    _, attached = BRIDGE.search_messages(has_attachments=True, since=since_recent, limit=1)
+    _, attached = BRIDGE.search_messages(mailbox_name="INBOX", has_attachments=True, since=since_recent, limit=1)
     if attached: ATTACHMENT_ID = attached[0]["id"]
     THREAD_ID = RECENT_ID  # any message id can seed a thread query
 
