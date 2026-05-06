@@ -24,8 +24,14 @@ echo ""
 mkdir -p "${OUT}"
 mcpb pack "${SCRIPT_DIR}" "${OUT}/apple-mail.mcpb"
 
+# Stamp the version into the file's Spotlight metadata so it shows in
+# Finder → Get Info → More Info: Version.
+VERSION=$(grep '^version' "${SCRIPT_DIR}/pyproject.toml" | head -1 | sed 's/version = "\(.*\)"/\1/')
+xattr -w "com.apple.metadata:kMDItemVersion" "${VERSION}" "${OUT}/apple-mail.mcpb"
+mdimport "${OUT}/apple-mail.mcpb" 2>/dev/null || true
+
 echo ""
-echo "✓ Built: ${OUT}/apple-mail.mcpb"
+echo "✓ Built: ${OUT}/apple-mail.mcpb  (v${VERSION})"
 echo ""
 echo "To install: double-click the .mcpb file, or drag it into Claude Desktop."
 echo ""

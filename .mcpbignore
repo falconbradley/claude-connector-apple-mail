@@ -31,3 +31,6 @@ kangentic.json
 
 # Old install script (replaced by mcpb install flow)
 install.sh
+
+# Dev harness — runs MailBridge directly without MCPB rebuild; not shipped.
+tools/
