@@ -4,10 +4,13 @@ Apple Mail MCP Server
 Exposes read-only access to Apple Mail via the Model Context Protocol so
 Claude Desktop can search and read emails.
 
-Communication with Mail.app is done through AppleScript/JXA, so there is
-no need for Full Disk Access.  Mail.app must be running, and macOS
-Automation permission must be granted (System Settings -> Privacy &
-Security -> Automation) so this process can control Mail.app.
+Reads are served from Mail.app's local message store (the Envelope Index
+SQLite database plus .emlx files) when the host process has Full Disk
+Access — this is orders of magnitude faster than Apple Events.  When FDA
+is missing, reads fall back to the original AppleScript/JXA bridge.
+Writes (drafts, flags) always go through Mail.app scripting, which
+requires Mail.app running and Automation permission (System Settings ->
+Privacy & Security -> Automation).
 
 Tools provided
 --------------
@@ -42,8 +45,9 @@ from urllib.parse import quote
 
 from mcp.server.fastmcp import FastMCP
 
-from .applescript import MailBridge, _FLAG_COLOR_ORDER
+from .applescript import _FLAG_COLOR_ORDER
 from .emlx import get_html_body
+from .hybrid import HybridBridge
 from .models import (
     Attachment,
     AttachmentData,
@@ -69,12 +73,13 @@ logging.basicConfig(
 logger = logging.getLogger("apple_mail_mcp")
 
 # ---------------------------------------------------------------------------
-# Lazy-initialised shared state.  MailBridge init takes ~12-18s (mailbox
-# prescan) so we MUST NOT run it at import time — the MCP client would
-# time out waiting for the initialize response.
+# Lazy-initialised shared state.  HybridBridge construction is free; the
+# expensive engines underneath (JXA mailbox prescan ~12-18s, Envelope
+# Index open) are initialised lazily on first use so the MCP client never
+# times out waiting for the initialize response.
 # ---------------------------------------------------------------------------
 
-_bridge: Optional[MailBridge] = None
+_bridge: Optional[HybridBridge] = None
 
 _VALID_FLAG_COLORS = frozenset({"red", "orange", "yellow", "green", "blue", "purple", "gray"})
 
@@ -95,26 +100,18 @@ mcp = FastMCP(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _require_bridge() -> MailBridge:
-    """Return the MailBridge instance, initialising on first call.
+def _require_bridge() -> HybridBridge:
+    """Return the shared HybridBridge, creating it on first call.
 
-    Retries on every call if init previously failed (Mail.app may have
-    been started or become responsive since the last attempt).
+    Construction never fails; each underlying engine (Envelope Index,
+    JXA) initialises lazily and raises a helpful error from the actual
+    tool call if it cannot come up.
     """
     global _bridge
-    if _bridge is not None:
-        return _bridge
-    try:
-        _bridge = MailBridge()
-        logger.info("Apple Mail MCP ready (AppleScript bridge).")
-        return _bridge
-    except (RuntimeError, OSError) as exc:
-        raise RuntimeError(
-            "Could not connect to Mail.app. Make sure Mail.app is open and "
-            "that this process has Automation permission in System Settings "
-            "-> Privacy & Security -> Automation."
-            f"\n\nUnderlying error: {exc}"
-        )
+    if _bridge is None:
+        _bridge = HybridBridge()
+        logger.info("Apple Mail MCP ready (hybrid bridge).")
+    return _bridge
 
 
 def _make_mail_link(rfc_id: Optional[str]) -> Optional[str]:
@@ -276,6 +273,7 @@ def search_emails(
         offset=offset,
         limit=limit,
         messages=[_dict_to_summary(r) for r in rows],
+        engine=bridge.last_engine,
     )
 
 
@@ -300,12 +298,16 @@ def get_email(message_id: int) -> EmailDetail:
     attachments = bridge.list_attachments(message_id)
     attachment_count = len(attachments)
 
+    # Only chase the flag color when the message is actually flagged —
+    # for unflagged mail (the vast majority) the color is definitionally
+    # None and the lookup would be wasted work on the JXA path.
     flag_color: Optional[str] = None
-    try:
-        flag_info = bridge.get_flag(message_id)
-        flag_color = flag_info.get("flag_color")
-    except Exception:
-        pass
+    if d.get("is_flagged"):
+        try:
+            flag_info = bridge.get_flag(message_id)
+            flag_color = flag_info.get("flag_color")
+        except Exception:
+            pass
 
     return EmailDetail(
         **summary.model_dump(),

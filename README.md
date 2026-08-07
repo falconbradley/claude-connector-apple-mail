@@ -26,18 +26,24 @@ Packaged as an [MCPB desktop extension](https://support.claude.com/en/articles/1
 
 ## How it works
 
-All communication with Mail.app is done through **JXA (JavaScript for Automation)** via `osascript -l JavaScript`. This means:
+Mail.app remains the **sync and auth engine** — it holds your Apple ID / iCloud credentials natively and continuously mirrors every account to disk. This server has two engines on top of that:
 
-- No direct database or filesystem access required
-- No Full Disk Access needed — only Automation permission (macOS prompts automatically)
-- Mail.app handles all IMAP/account authentication natively
+### Fast read path (default, needs Full Disk Access)
 
-The server uses a **two-round bulk-fetch search architecture** optimised for large mailboxes:
+Reads are served directly from Mail.app's local message store:
 
-1. **Round 1** — For each non-empty mailbox, bulk-fetch message IDs + dates + conditional filter properties (subjects, senders, recipients, flags). Apply all filters as JavaScript post-processing. Sort by date, paginate.
-2. **Round 2** — For only the mailboxes containing page results, bulk-fetch display properties (subject, sender, read/flagged status) to complete the result set.
+- **`~/Library/Mail/V*/MailData/Envelope Index`** — Mail's SQLite index of every message (subjects, senders, recipients, dates, read/flag state). Searches complete in **milliseconds** instead of tens of seconds.
+- **`.emlx` files** — raw RFC 2822 messages on disk, parsed for bodies, headers, HTML, and attachments.
 
-This approach avoids Mail.app's extremely slow `whose` queries and per-message property access, achieving ~37s search times across 60k+ messages.
+No credentials are ever handled: the server is a read-only consumer of data Mail.app has already synced. The store is opened read-only (`PRAGMA query_only`) and never mutated. The only extra requirement is **Full Disk Access** for the host process (Claude Desktop), granted once in System Settings.
+
+The schema of the Envelope Index varies across macOS releases, so the server introspects it at runtime and adapts (falling back to the documented `flags` bitfield when dedicated columns are absent). Run `uv run python -m apple_mail_mcp.selftest` from a terminal with Full Disk Access to verify the fast path on your machine.
+
+### JXA fallback + writes
+
+When Full Disk Access is missing, reads transparently fall back to the original **JXA (JavaScript for Automation)** bridge (the two-round bulk-fetch search, ~37s across 60k+ messages). Search results include an `engine` field (`"sqlite"` or `"applescript"`) so you can tell which path served them. Set `APPLE_MAIL_MCP_DISABLE_FAST=1` to force the JXA path.
+
+Writes — drafts, reply drafts, flag changes — always go through Mail.app scripting (Automation permission), so Mail.app owns every mutation and syncs it back to the server (e.g. iCloud) itself.
 
 ---
 
@@ -85,9 +91,10 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ### Permissions
 
-Mail.app must be running. On first use, macOS will prompt you to grant Automation permission — just click **OK**. No Full Disk Access is needed.
+Two macOS permissions matter:
 
-If the prompt doesn't appear, check **System Settings > Privacy & Security > Automation** and ensure your host process (Claude Desktop or Terminal) is allowed to control Mail.app.
+1. **Full Disk Access** (for the fast read path): System Settings > Privacy & Security > Full Disk Access > enable **Claude Desktop** (and your terminal app if you want to run the selftest). Without it, reads still work via the slow AppleScript fallback.
+2. **Automation** (for writes and the fallback): Mail.app must be running; macOS prompts automatically on first use — click **OK**. If the prompt doesn't appear, check System Settings > Privacy & Security > Automation.
 
 ---
 

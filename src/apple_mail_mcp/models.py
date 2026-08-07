@@ -63,6 +63,9 @@ class SearchResult(BaseModel):
     offset: int
     limit: int
     messages: list[EmailSummary]
+    # Which engine served this search: "sqlite" (fast local-store path)
+    # or "applescript" (JXA fallback).
+    engine: Optional[str] = None
 
 
 class MailboxStats(BaseModel):
