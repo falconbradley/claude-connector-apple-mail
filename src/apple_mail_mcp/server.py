@@ -18,6 +18,7 @@ Tools provided
   list_mailboxes        - All accounts / folders with counts
   search_emails         - Rich search: text, sender, date, flags, mailbox
   get_email             - Full email with decoded plain-text body
+  open_email_in_mail    - Open an email in Mail.app (bypasses blocked message:// links)
   get_email_html        - HTML body of a specific email
   get_thread            - All emails in a conversation thread
   list_email_attachments - Enumerate attachments for an email
@@ -38,6 +39,7 @@ from __future__ import annotations
 import base64
 import email as email_lib
 import logging
+import subprocess
 import sys
 from datetime import datetime
 from typing import Optional
@@ -208,8 +210,13 @@ def search_emails(
 ) -> SearchResult:
     """Search Apple Mail messages with flexible filters.
 
-    Results don't include mail_link for performance. Use get_email_link or
-    get_email on a specific result to get a clickable message:// URL.
+    When served by the fast local-store engine (engine == "sqlite"), each
+    result includes message_id and a clickable mail_link (message:// URL)
+    — include these links in responses when the user wants to open emails
+    in Mail.app. Note that chat UIs often block the message:// scheme; use
+    the open_email_in_mail tool to open a message directly instead. On the
+    AppleScript fallback engine, links are omitted for performance — use
+    get_email_link or get_email for a specific message there.
 
     Args:
         query:           Free-text search applied to the subject line.
@@ -336,6 +343,33 @@ def get_email_link(message_id: int) -> dict:
         "message_id": message_id,
         "mail_link": _make_mail_link(rfc_id),
     }
+
+
+@mcp.tool()
+def open_email_in_mail(message_id: int) -> dict:
+    """Open an email directly in Mail.app on this Mac.
+
+    Use this when the user asks to open/show/jump to an email — it is the
+    reliable alternative to message:// links, which many chat UIs refuse
+    to open when clicked. Brings Mail.app to the foreground with the
+    message selected.
+
+    Args:
+        message_id: The integer ID from search_emails results.
+    """
+    bridge = _require_bridge()
+    rfc_id = bridge.get_message_id_header(message_id)
+    if rfc_id is None:
+        raise ValueError(f"Message {message_id} not found.")
+    link = _make_mail_link(rfc_id)
+    proc = subprocess.run(
+        ["open", link], capture_output=True, text=True, timeout=15
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Failed to open message in Mail.app: {proc.stderr.strip() or 'unknown error'}"
+        )
+    return {"message_id": message_id, "mail_link": link, "opened": True}
 
 
 @mcp.tool()

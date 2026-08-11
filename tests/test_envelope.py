@@ -272,6 +272,21 @@ def test_search_recent_sorted(bridge):
     assert rows[0]["has_attachments"] is True
     assert rows[0]["mailbox_name"] == "INBOX"
     assert rows[0]["account_name"] == "brad@icloud.com"
+    # Message-ID headers come from .emlx so search results carry
+    # clickable message:// links without extra round-trips
+    by_id = {r["id"]: r for r in rows}
+    assert by_id[101]["message_id"] == "invoice-101@example.com"
+    assert by_id[102]["message_id"] == "reply-102@example.com"
+    assert by_id[106]["message_id"] == "msg-attach@example.com"
+    assert by_id[104]["message_id"] is None  # no .emlx on disk
+
+
+def test_thread_results_carry_message_id(bridge):
+    rows = bridge.get_thread_messages(101)
+    assert [r["message_id"] for r in rows] == [
+        "invoice-101@example.com",
+        "reply-102@example.com",
+    ]
 
 
 def test_search_query_mode_subject_or_sender(bridge):

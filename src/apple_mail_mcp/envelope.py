@@ -39,6 +39,7 @@ from .emlx import (
     get_text_body,
     html_to_text,
     read_emlx,
+    read_emlx_headers,
     read_emlx_message_bytes,
 )
 
@@ -124,6 +125,10 @@ class EnvelopeIndexBridge:
         # message ROWID -> emlx path cache
         self._emlx_index: dict[int, Path] = {}
         self._emlx_last_scan = 0.0
+
+        # message ROWID -> RFC Message-ID header (messages are immutable,
+        # so entries never go stale)
+        self._rfc_id_cache: dict[int, Optional[str]] = {}
 
         logger.info(
             "EnvelopeIndexBridge ready: %s (%d mailboxes, epoch=%s)",
@@ -438,6 +443,22 @@ class EnvelopeIndexBridge:
                 return path
         return None
 
+    def _rfc_message_id(self, message_rowid: int) -> Optional[str]:
+        """RFC 2822 Message-ID (no angle brackets) via a cheap header-only
+        .emlx read, cached forever (messages are immutable)."""
+        if message_rowid in self._rfc_id_cache:
+            return self._rfc_id_cache[message_rowid]
+        rfc_id: Optional[str] = None
+        path = self._find_emlx(message_rowid)
+        if path is not None:
+            try:
+                headers = read_emlx_headers(path)
+                rfc_id = (headers.get("Message-ID") or "").strip().strip("<>") or None
+            except (OSError, ValueError) as exc:
+                logger.debug("Header read failed for %d: %s", message_rowid, exc)
+        self._rfc_id_cache[message_rowid] = rfc_id
+        return rfc_id
+
     def _read_message_file(self, message_rowid: int):
         path = self._find_emlx(message_rowid)
         if path is None:
@@ -653,7 +674,7 @@ class EnvelopeIndexBridge:
                     "has_attachments": bool(has_att),
                     "mailbox_name": mbox_name,
                     "account_name": account,
-                    "message_id": None,
+                    "message_id": self._rfc_message_id(rowid),
                     "in_reply_to": None,
                     "size": size or 0,
                 }
@@ -856,7 +877,7 @@ class EnvelopeIndexBridge:
                     "has_attachments": bool(has_att),
                     "mailbox_name": mbox_name,
                     "account_name": account,
-                    "message_id": None,
+                    "message_id": self._rfc_message_id(rowid),
                     "in_reply_to": None,
                     "size": size or 0,
                 }

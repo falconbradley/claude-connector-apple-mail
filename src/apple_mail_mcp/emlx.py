@@ -42,6 +42,28 @@ def read_emlx(path: Path) -> email_lib.message.Message:
     return email_lib.message_from_bytes(read_emlx_message_bytes(path))
 
 
+def read_emlx_headers(path: Path) -> email_lib.message.Message:
+    """Parse only the header block of an .emlx file (cheap: reads the
+    first few KB instead of the whole message)."""
+    with path.open("rb") as fh:
+        first_line = fh.readline()
+        if not first_line.strip().isdigit():
+            raise ValueError(f"Not an emlx file (bad length line): {path}")
+        chunks = []
+        while True:
+            chunk = fh.read(8192)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            blob = b"".join(chunks) if len(chunks) > 1 else chunk
+            end = blob.find(b"\r\n\r\n")
+            if end == -1:
+                end = blob.find(b"\n\n")
+            if end != -1:
+                return email_lib.message_from_bytes(blob[:end])
+    return email_lib.message_from_bytes(b"".join(chunks))
+
+
 # ---------------------------------------------------------------------------
 # HTML -> text (fallback when a message has no text/plain part)
 # ---------------------------------------------------------------------------
