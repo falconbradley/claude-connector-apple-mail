@@ -31,6 +31,10 @@ class EmailSummary(BaseModel):
     message_id: Optional[str] = None   # RFC 2822 Message-ID header
     in_reply_to: Optional[str] = None
     mail_link: Optional[str] = None    # message:// URL to open in Mail.app
+    # Localhost http:// URL that opens the email in Mail.app via the
+    # browser — use THIS for links in chat responses, since chat UIs
+    # block the message:// scheme but open http links fine.
+    open_link: Optional[str] = None
 
 
 class EmailDetail(EmailSummary):

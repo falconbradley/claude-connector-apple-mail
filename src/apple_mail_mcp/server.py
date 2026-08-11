@@ -50,6 +50,7 @@ from mcp.server.fastmcp import FastMCP
 from .applescript import _FLAG_COLOR_ORDER
 from .emlx import get_html_body
 from .hybrid import HybridBridge
+from .weblink import WebLinkServer
 from .models import (
     Attachment,
     AttachmentData,
@@ -82,6 +83,7 @@ logger = logging.getLogger("apple_mail_mcp")
 # ---------------------------------------------------------------------------
 
 _bridge: Optional[HybridBridge] = None
+_weblink: Optional[WebLinkServer] = None
 
 _VALID_FLAG_COLORS = frozenset({"red", "orange", "yellow", "green", "blue", "purple", "gray"})
 
@@ -123,6 +125,24 @@ def _make_mail_link(rfc_id: Optional[str]) -> Optional[str]:
     return f"message://{quote(f'<{rfc_id}>', safe='')}"
 
 
+def _get_weblink() -> WebLinkServer:
+    """Shared localhost redirector for chat-clickable email links."""
+    global _weblink
+    if _weblink is None:
+        _weblink = WebLinkServer(
+            resolve_rfc_id=lambda mid: _require_bridge().get_message_id_header(mid)
+        )
+    return _weblink
+
+
+def _make_open_link(message_id: int) -> Optional[str]:
+    try:
+        return _get_weblink().open_link(message_id)
+    except Exception:
+        logger.exception("Could not build open_link for %d", message_id)
+        return None
+
+
 def _dict_to_summary(d: dict) -> EmailSummary:
     """Convert a MailBridge result dict to an EmailSummary model."""
     date_sent: Optional[datetime] = None
@@ -155,6 +175,7 @@ def _dict_to_summary(d: dict) -> EmailSummary:
         message_id=rfc_id,
         in_reply_to=d.get("in_reply_to") or None,
         mail_link=_make_mail_link(rfc_id),
+        open_link=_make_open_link(d["id"]),
     )
 
 
@@ -210,13 +231,13 @@ def search_emails(
 ) -> SearchResult:
     """Search Apple Mail messages with flexible filters.
 
-    When served by the fast local-store engine (engine == "sqlite"), each
-    result includes message_id and a clickable mail_link (message:// URL)
-    — include these links in responses when the user wants to open emails
-    in Mail.app. Note that chat UIs often block the message:// scheme; use
-    the open_email_in_mail tool to open a message directly instead. On the
-    AppleScript fallback engine, links are omitted for performance — use
-    get_email_link or get_email for a specific message there.
+    Each result includes an open_link (localhost http:// URL) — when the
+    user wants clickable links to emails, put open_link in the response:
+    clicking it routes through the browser and pops the message open in
+    Mail.app. (mail_link, the raw message:// URL, is also included when
+    served by the fast engine, but chat UIs usually block that scheme.)
+    The open_email_in_mail tool opens a message directly without any
+    clicking.
 
     Args:
         query:           Free-text search applied to the subject line.
@@ -328,9 +349,11 @@ def get_email(message_id: int) -> EmailDetail:
 
 @mcp.tool()
 def get_email_link(message_id: int) -> dict:
-    """Get a message:// URL that opens an email directly in Mail.app.
+    """Get links that open an email in Mail.app.
 
     Lightweight alternative to get_email when you only need the link.
+    Returns open_link (localhost http:// URL — clickable in chat UIs)
+    and mail_link (raw message:// URL — blocked by most chat UIs).
 
     Args:
         message_id: The integer ID from search_emails results.
@@ -342,6 +365,7 @@ def get_email_link(message_id: int) -> dict:
     return {
         "message_id": message_id,
         "mail_link": _make_mail_link(rfc_id),
+        "open_link": _make_open_link(message_id),
     }
 
 
