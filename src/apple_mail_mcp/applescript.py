@@ -699,6 +699,52 @@ class MailBridge:
 
         return total, results
 
+    def get_selected_messages(self) -> list[dict]:
+        """Return the messages currently selected in Mail.app's viewer.
+
+        Returns a list (possibly empty) of dicts with keys:
+          id, subject, sender, date_sent (ISO 8601 or None),
+          message_id (RFC 2822 Message-ID, may be empty for drafts that
+          haven't been sent yet), mailbox_name, account_name.
+
+        Note: Mail.app exposes `selection` only when the user has clicked
+        a message in the message-list view. Newly-opened compose windows
+        or smart-mailbox previews may not populate it.
+        """
+        script = """
+        (function() {
+            var mail = Application("Mail");
+            var sel;
+            try { sel = mail.selection(); } catch(e) { return JSON.stringify([]); }
+            if (!sel || sel.length === 0) return JSON.stringify([]);
+            var out = [];
+            for (var i = 0; i < sel.length; i++) {
+                var m = sel[i];
+                var item = {id: null, subject: "", sender: "", date_sent: null,
+                            message_id: "", mailbox_name: "", account_name: ""};
+                try { item.id = m.id(); } catch(e) {}
+                try { item.subject = m.subject(); } catch(e) {}
+                try { item.sender = m.sender(); } catch(e) {}
+                try {
+                    var ds = m.dateSent();
+                    if (ds) item.date_sent = ds.toISOString();
+                } catch(e) {}
+                try { item.message_id = m.messageId() || ""; } catch(e) {}
+                try {
+                    var mb = m.mailbox();
+                    item.mailbox_name = mb.name();
+                    try { item.account_name = mb.account().name(); } catch(e2) {}
+                } catch(e) {}
+                out.push(item);
+            }
+            return JSON.stringify(out);
+        })();
+        """
+        result = self._run_jxa(script, timeout=10)
+        if not isinstance(result, list):
+            return []
+        return result
+
     def get_message_id_header(self, message_id: int) -> Optional[str]:
         """Get just the RFC 2822 Message-ID header for a message.
 

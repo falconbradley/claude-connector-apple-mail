@@ -16,6 +16,7 @@ Packaged as an [MCPB desktop extension](https://support.claude.com/en/articles/1
 | `get_email` | Full email with decoded plain-text body, recipients, flag color, and metadata |
 | `get_email_link` | Get a `message://` URL that opens the email directly in Mail.app |
 | `open_email_in_mail` | Open an email directly in Mail.app (for chat UIs that block `message://` links) |
+| `get_selected_emails` | The message(s) currently selected in Mail.app's viewer — id, subject, sender, mailbox, and open-in-Mail links |
 | `get_email_html` | HTML body of a message |
 | `get_thread` | All messages in a conversation thread |
 | `list_email_attachments` | Enumerate attachments for any email |

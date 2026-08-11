@@ -219,6 +219,13 @@ class HybridBridge:
         self.last_engine = "applescript"
         return result
 
+    def get_selected_messages(self) -> list[dict]:
+        """UI-state read — only Mail.app knows the current selection, so
+        this is always JXA regardless of the fast path."""
+        result = self._jxa().get_selected_messages()
+        self.last_engine = "applescript"
+        return result
+
     # ------------------------------------------------------------------
     # Writes: always JXA (Mail.app owns the store)
     # ------------------------------------------------------------------

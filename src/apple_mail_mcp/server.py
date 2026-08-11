@@ -19,6 +19,7 @@ Tools provided
   search_emails         - Rich search: text, sender, date, flags, mailbox
   get_email             - Full email with decoded plain-text body
   open_email_in_mail    - Open an email in Mail.app (bypasses blocked message:// links)
+  get_selected_emails   - Messages currently selected in Mail.app (with links)
   get_email_html        - HTML body of a specific email
   get_thread            - All emails in a conversation thread
   list_email_attachments - Enumerate attachments for an email
@@ -397,6 +398,47 @@ def open_email_in_mail(message_id: int) -> dict:
 
 
 @mcp.tool()
+def get_selected_emails() -> list[dict]:
+    """Return the email(s) currently selected in Mail.app's viewer.
+
+    Useful when the user says "this email" or "the one I'm looking at" —
+    answers without needing them to copy a link or search. Returns one
+    entry per selected message (typically a list of length 1).
+
+    Each entry contains:
+      - id: integer Mail.app ID (pass to other tools)
+      - subject, sender, date_sent
+      - mailbox, account
+      - message_id: RFC 2822 Message-ID (empty string for drafts that
+        haven't been sent — drafts don't get a Message-ID until send)
+      - mail_link: clickable message:// URL, or null when message_id is
+        empty (drafts)
+      - open_link: localhost http:// URL that opens the email in Mail.app
+        — use this for links in chat responses
+
+    Returns an empty list when no message is selected.
+    """
+    bridge = _require_bridge()
+    rows = bridge.get_selected_messages()
+    out: list[dict] = []
+    for r in rows:
+        rfc_id = r.get("message_id") or None
+        msg_id = r.get("id")
+        out.append({
+            "id": msg_id,
+            "subject": r.get("subject") or "(no subject)",
+            "sender": r.get("sender") or "",
+            "date_sent": r.get("date_sent"),
+            "mailbox": r.get("mailbox_name") or "",
+            "account": r.get("account_name") or "",
+            "message_id": rfc_id,
+            "mail_link": _make_mail_link(rfc_id),
+            "open_link": _make_open_link(msg_id) if msg_id is not None else None,
+        })
+    return out
+
+
+@mcp.tool()
 def get_email_html(message_id: int) -> dict:
     """Get the HTML body of an email.
 
@@ -565,6 +607,11 @@ def create_email_draft(
     The draft is saved to the Drafts mailbox. The returned draft_link is a
     message:// URL that opens the draft directly in Mail.app when clicked.
 
+    Agent guidance: after calling this, tell the user the draft has been
+    saved to Mail.app's Drafts mailbox and share the `draft_link` (if
+    present) so they can open and review it. The draft is NOT sent — it
+    waits for the user to review and send manually in Mail.app.
+
     Args:
         to:      Recipient addresses, e.g. ["Name <user@example.com>", "other@example.com"].
         subject: Subject line.
@@ -612,6 +659,13 @@ def create_email_reply_draft(
     References headers so the reply threads correctly in the recipient's mail
     client. The draft is saved to the source account's Drafts mailbox; the
     returned draft_link is a message:// URL that opens it in Mail.app.
+
+    Agent guidance: this tool also leaves the reply compose window OPEN
+    and foregrounded in Mail.app so the user can review and send. After
+    calling, tell the user that the reply draft is ready and waiting in
+    Mail — they should switch to Mail.app to review and send. Do NOT
+    imply the message was sent; nothing leaves Mail.app until the user
+    clicks Send themselves.
 
     Args:
         message_id:     Integer ID of the message being replied to (from search_emails).
