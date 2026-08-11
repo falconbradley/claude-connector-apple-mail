@@ -58,6 +58,14 @@ _FLAG_ATTACH_MASK = 0x3F
 # Minimum interval between full re-walks of the Mail dir for .emlx lookup.
 _EMLX_RESCAN_INTERVAL = 30.0
 
+# System accounts store: maps Mail's account UUIDs to display names
+# ("iCloud", "Work Gmail", ...). Readable with Full Disk Access.
+_ACCOUNTS_DB = Path.home() / "Library" / "Accounts" / "Accounts4.sqlite"
+
+_UUID_RE = re.compile(
+    r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+)
+
 
 class EnvelopeUnavailable(RuntimeError):
     """The Envelope Index cannot be used (no FDA, missing, schema drift)."""
@@ -81,11 +89,19 @@ class EnvelopeIndexBridge:
     this bridge can be handed to the JXA bridge for write operations.
     """
 
-    def __init__(self, mail_root: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        mail_root: Optional[Path] = None,
+        accounts_db: Optional[Path] = None,
+    ) -> None:
         root = mail_root or Path(
             os.environ.get("APPLE_MAIL_MCP_MAIL_ROOT", Path.home() / "Library" / "Mail")
         )
         self.mail_root = Path(root)
+        self.accounts_db = Path(
+            accounts_db
+            or os.environ.get("APPLE_MAIL_MCP_ACCOUNTS_DB", _ACCOUNTS_DB)
+        )
         self.version_dir = self._locate_version_dir(self.mail_root)
         self.db_path = self.version_dir / "MailData" / "Envelope Index"
         if not self._exists(self.db_path):
@@ -97,6 +113,9 @@ class EnvelopeIndexBridge:
         self._conn = self._connect(self.db_path)
         self._introspect_schema()
         self._detect_epoch()
+
+        # account UUID -> display name ("iCloud", "Work Gmail", ...)
+        self._account_names = self._load_account_names()
 
         # mailbox ROWID -> (account_display, mailbox_name, url)
         self._mailboxes: dict[int, tuple[str, str, str]] = {}
@@ -135,6 +154,10 @@ class EnvelopeIndexBridge:
             raise EnvelopeUnavailable(
                 f"Cannot read {root} — the host process needs Full Disk Access "
                 "(System Settings -> Privacy & Security -> Full Disk Access). "
+                "NOTE: when running as a Claude Desktop extension, macOS "
+                "attributes this permission to the 'uv' launcher binary, not "
+                "to Claude — look for 'uv' in the Full Disk Access list and "
+                "enable it, then disable/re-enable the extension. "
                 f"Underlying error: {exc}"
             )
         except FileNotFoundError:
@@ -277,6 +300,40 @@ class EnvelopeIndexBridge:
         # for the same era are ~7.6e8 or lower.
         self._epoch_offset = 0 if max_date > 1.0e9 else _MAC_EPOCH_OFFSET
 
+    def _load_account_names(self) -> dict[str, str]:
+        """Map Mail account UUIDs to display names via the system accounts
+        store. Modern Envelope Index mailbox urls are imap://<UUID>/INBOX;
+        the human name ("iCloud") lives on the parent account in
+        Accounts4.sqlite. Best-effort: any failure just means UUIDs show
+        through as account names."""
+        if not self._exists(self.accounts_db):
+            return {}
+        try:
+            uri = f"file:{quote(str(self.accounts_db))}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT a.ZIDENTIFIER,
+                           COALESCE(NULLIF(p.ZACCOUNTDESCRIPTION, ''),
+                                    NULLIF(a.ZACCOUNTDESCRIPTION, ''),
+                                    NULLIF(p.ZUSERNAME, ''),
+                                    NULLIF(a.ZUSERNAME, ''))
+                    FROM ZACCOUNT a
+                    LEFT JOIN ZACCOUNT p ON a.ZPARENTACCOUNT = p.Z_PK
+                    WHERE a.ZIDENTIFIER IS NOT NULL
+                    """
+                ).fetchall()
+            finally:
+                conn.close()
+            mapping = {ident: name for ident, name in rows if ident and name}
+            logger.info("Loaded %d account names from accounts store.", len(mapping))
+            return mapping
+        except sqlite3.Error as exc:
+            logger.warning("Could not read accounts store (%s); account names "
+                           "will show as UUIDs.", exc)
+            return {}
+
     def _load_mailboxes(self) -> None:
         rows = self._query("SELECT ROWID, url FROM mailboxes")
         mapping: dict[int, tuple[str, str, str]] = {}
@@ -284,14 +341,13 @@ class EnvelopeIndexBridge:
             mapping[rowid] = self._parse_mailbox_url(url or "")
         self._mailboxes = mapping
 
-    @staticmethod
-    def _parse_mailbox_url(url: str) -> tuple[str, str, str]:
+    def _parse_mailbox_url(self, url: str) -> tuple[str, str, str]:
         """Return (account_display, mailbox_name, url).
 
         Typical urls:
-          imap://brad%40icloud.com@p58-imap.mail.me.com/INBOX
-          imap://.../Sent%20Messages
-          local:///Drafts   (On My Mac)
+          imap://62653857-BF50-4534-AB81-8F72E0FCEDF5/INBOX   (modern: UUID)
+          imap://brad%40icloud.com@p58-imap.mail.me.com/INBOX (older: user@host)
+          local:///Drafts                                     (On My Mac)
         """
         try:
             parsed = urlparse(url)
@@ -304,6 +360,8 @@ class EnvelopeIndexBridge:
             account = unquote(parsed.netloc.rsplit("@", 1)[0])
         else:
             account = unquote(parsed.netloc)
+            if _UUID_RE.fullmatch(account):
+                account = self._account_names.get(account.upper(), account)
         return (account, name or url, url)
 
     # ------------------------------------------------------------------

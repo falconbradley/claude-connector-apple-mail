@@ -400,6 +400,57 @@ def test_get_flag(bridge):
         bridge.get_flag(99999)
 
 
+def test_uuid_account_urls_resolve_via_accounts_store(tmp_path):
+    """Modern Envelope Index urls are imap://<ACCOUNT-UUID>/INBOX; names
+    come from the system accounts store (parent account description)."""
+    build_store(tmp_path, modern=True)
+    uuid = "927B9716-9A7E-471E-963A-B80E2BE8A853"
+    env_db = tmp_path / "V10" / "MailData" / "Envelope Index"
+    db = sqlite3.connect(env_db)
+    db.execute(
+        "UPDATE mailboxes SET url = ? WHERE ROWID = 1",
+        (f"imap://{uuid}/INBOX",),
+    )
+    db.commit()
+    db.close()
+
+    accounts_db = tmp_path / "Accounts4.sqlite"
+    adb = sqlite3.connect(accounts_db)
+    adb.executescript(
+        """
+        CREATE TABLE ZACCOUNT (Z_PK INTEGER PRIMARY KEY, ZIDENTIFIER TEXT,
+                               ZACCOUNTDESCRIPTION TEXT, ZUSERNAME TEXT,
+                               ZPARENTACCOUNT INTEGER);
+        INSERT INTO ZACCOUNT VALUES (1, 'PARENT-UUID', 'iCloud',
+                                     'bradtallon@me.com', NULL);
+        INSERT INTO ZACCOUNT VALUES (2, '927B9716-9A7E-471E-963A-B80E2BE8A853',
+                                     '', '', 1);
+        """
+    )
+    adb.commit()
+    adb.close()
+
+    bridge = EnvelopeIndexBridge(mail_root=tmp_path, accounts_db=accounts_db)
+    total, rows = bridge.search_messages(limit=1)
+    assert rows[0]["account_name"] == "iCloud"
+    # account filter matches the display name now (4 INBOX messages via
+    # the mapped "iCloud" name + 1 sent message whose unmapped account
+    # "brad@icloud.com" also contains the substring)
+    total, rows = bridge.search_messages(account_name="icloud", limit=10)
+    assert total == 5
+    total, rows = bridge.search_messages(
+        account_name="iCloud", mailbox_name="INBOX", limit=10
+    )
+    assert total == 4
+
+    # without the accounts store, the UUID falls through as the name
+    bare = EnvelopeIndexBridge(
+        mail_root=tmp_path, accounts_db=tmp_path / "missing.sqlite"
+    )
+    total, rows = bare.search_messages(limit=1)
+    assert rows[0]["account_name"] == uuid
+
+
 def test_external_attachment_from_partial_emlx(bridge, tmp_path):
     # Strip the payload out of the partial emlx and park the body on disk
     # the way Mail does for .partial.emlx messages.
