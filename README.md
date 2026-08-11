@@ -1,6 +1,6 @@
 # Apple Mail MCP
 
-A Claude Desktop extension that gives **Claude access to Apple Mail** on macOS via Mail.app's native scripting interface. No IMAP credentials, no database access, no Full Disk Access needed — just Automation permission, which macOS prompts for automatically.
+A Claude Desktop extension that gives **Claude fast access to Apple Mail** on macOS. Reads come straight from Mail.app's local message store — searching a 250k-message mailbox takes **milliseconds**, not tens of seconds — while Mail.app remains the sync and auth engine (iCloud, Gmail, anything Mail supports), so no IMAP credentials or passwords are ever handled. Writes (drafts, flags) go through Mail.app's native scripting interface.
 
 Packaged as an [MCPB desktop extension](https://support.claude.com/en/articles/12922929-building-desktop-extensions-with-mcpb) with the Apple Mail icon and one-click install.
 
@@ -12,10 +12,11 @@ Packaged as an [MCPB desktop extension](https://support.claude.com/en/articles/1
 |------|-------------|
 | `get_stats` | Total messages, unread count, mailbox and account counts |
 | `list_mailboxes` | Every account/folder with message counts |
-| `search_emails` | Rich search: free text, sender, recipient (To/CC), subject, date range, read/flagged status, attachments |
+| `search_emails` | Rich search: free text, sender, recipient (To/CC), subject, date range, read/flagged status, attachments. Every result includes clickable open-in-Mail links |
 | `get_email` | Full email with decoded plain-text body, recipients, flag color, and metadata |
 | `get_email_link` | Get a `message://` URL that opens the email directly in Mail.app |
-| `get_selected_emails` | The message(s) currently selected in Mail.app's viewer — id, subject, sender, mailbox, and `message://` link |
+| `open_email_in_mail` | Open an email directly in Mail.app (for chat UIs that block `message://` links) |
+| `get_selected_emails` | The message(s) currently selected in Mail.app's viewer — id, subject, sender, mailbox, and open-in-Mail links |
 | `get_email_html` | HTML body of a message |
 | `get_thread` | All messages in a conversation thread |
 | `list_email_attachments` | Enumerate attachments for any email |
@@ -27,18 +28,33 @@ Packaged as an [MCPB desktop extension](https://support.claude.com/en/articles/1
 
 ## How it works
 
-All communication with Mail.app is done through **JXA (JavaScript for Automation)** via `osascript -l JavaScript`. This means:
+Mail.app remains the **sync and auth engine** — it holds your Apple ID / iCloud credentials natively and continuously mirrors every account to disk. This server has two engines on top of that:
 
-- No direct database or filesystem access required
-- No Full Disk Access needed — only Automation permission (macOS prompts automatically)
-- Mail.app handles all IMAP/account authentication natively
+### Fast read path (default, needs Full Disk Access)
 
-The server uses a **two-round bulk-fetch search architecture** optimised for large mailboxes:
+Reads are served directly from Mail.app's local message store:
 
-1. **Round 1** — For each non-empty mailbox, bulk-fetch message IDs + dates + conditional filter properties (subjects, senders, recipients, flags). Apply all filters as JavaScript post-processing. Sort by date, paginate.
-2. **Round 2** — For only the mailboxes containing page results, bulk-fetch display properties (subject, sender, read/flagged status) to complete the result set.
+- **`~/Library/Mail/V*/MailData/Envelope Index`** — Mail's SQLite index of every message (subjects, senders, recipients, dates, read/flag state). Searches complete in **milliseconds** instead of tens of seconds.
+- **`.emlx` files** — raw RFC 2822 messages on disk, parsed for bodies, headers, HTML, and attachments.
 
-This approach avoids Mail.app's extremely slow `whose` queries and per-message property access, achieving ~37s search times across 60k+ messages.
+No credentials are ever handled: the server is a read-only consumer of data Mail.app has already synced. The store is opened read-only (`PRAGMA query_only`) and never mutated. The only extra requirement is **Full Disk Access**, granted once in System Settings — see [Permissions](#permissions) for the `uv` gotcha.
+
+The schema of the Envelope Index varies across macOS releases, so the server introspects it at runtime and adapts (falling back to the documented `flags` bitfield when dedicated columns are absent). Account UUIDs in mailbox URLs are resolved to display names ("iCloud", "Work Gmail") via the system accounts store. Run `uv run python -m apple_mail_mcp.selftest` from a terminal with Full Disk Access to verify the fast path on your machine.
+
+### Clickable open-in-Mail links
+
+Every search/thread/email result carries two links:
+
+- **`mail_link`** — the raw `message://<Message-ID>` URL. Works in Terminal (`open '<url>'`), Notes, Reminders, task managers, and Safari — but most chat UIs (including Claude Desktop and Claude Code) block custom URL schemes in rendered links.
+- **`open_link`** — `http://127.0.0.1:<port>/open/<id>?t=<token>`. Chat UIs open http links fine: the click routes through your browser to a tiny localhost-only server inside the extension, which tells macOS to front Mail.app on that message. Requests require a per-install random token (persisted, so links in old conversations keep working); the endpoint's only capability is focusing Mail — it never serves message content.
+
+There is also an `open_email_in_mail` tool so Claude can jump to a message directly without any clicking.
+
+### JXA fallback + writes
+
+When Full Disk Access is missing, reads transparently fall back to the original **JXA (JavaScript for Automation)** bridge (the two-round bulk-fetch search, ~37s across 60k+ messages). Search results include an `engine` field (`"sqlite"` or `"applescript"`) so you can tell which path served them. Set `APPLE_MAIL_MCP_DISABLE_FAST=1` to force the JXA path.
+
+Writes — drafts, reply drafts, flag changes — always go through Mail.app scripting (Automation permission), so Mail.app owns every mutation and syncs it back to the server (e.g. iCloud) itself.
 
 ---
 
@@ -86,9 +102,10 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ### Permissions
 
-Mail.app must be running. On first use, macOS will prompt you to grant Automation permission — just click **OK**. No Full Disk Access is needed.
+Two macOS permissions matter:
 
-If the prompt doesn't appear, check **System Settings > Privacy & Security > Automation** and ensure your host process (Claude Desktop or Terminal) is allowed to control Mail.app.
+1. **Full Disk Access** (for the fast read path): System Settings > Privacy & Security > Full Disk Access > enable **uv**. Claude Desktop launches extension servers through a helper that makes the spawned process itself responsible for permissions, so macOS attributes FDA to the `uv` launcher binary — enabling Claude Desktop alone is *not* sufficient. If `uv` isn't in the list, add it with **+** (press Cmd+Shift+G): `~/.local/bin/uv` and/or `~/Library/Application Support/Claude/uv-runtime/<version>/uv`. Then disable/re-enable the extension. Without FDA, reads still work via the slow AppleScript fallback. (Enable your terminal app too if you want to run the selftest.)
+2. **Automation** (for writes and the fallback): Mail.app must be running; macOS prompts automatically on first use — click **OK**. If the prompt doesn't appear, check System Settings > Privacy & Security > Automation.
 
 ---
 
@@ -185,9 +202,10 @@ Times measured against ~61K messages across 7 mailboxes. Searches without option
 
 ## Security & privacy
 
-- Read operations never modify your mail. Write operations are limited to: creating drafts (saved locally, never sent automatically) and setting/removing flags on messages.
-- No data leaves your machine — this is a local MCP server.
-- Only requires Automation permission, not Full Disk Access.
+- Read operations never modify your mail: the Envelope Index is opened with `PRAGMA query_only` and `.emlx` files are only ever read. Write operations go through Mail.app scripting and are limited to: creating drafts (saved locally, never sent automatically) and setting/removing flags on messages.
+- No data leaves your machine — this is a local MCP server. Mail.app keeps sole custody of account credentials (iCloud sign-in, OAuth, etc.).
+- The open-in-Mail link redirector binds to 127.0.0.1 only, requires a per-install random token on every request, and can only focus Mail.app on a message — it never serves message content.
+- Full Disk Access (read-only usage) powers the fast search path; without it the extension degrades to Automation-only scripting.
 - macOS-only (`"platforms": ["darwin"]` in manifest).
 - Attachment data is returned as base64 only when explicitly requested.
 

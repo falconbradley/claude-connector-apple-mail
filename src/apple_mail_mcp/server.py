@@ -4,10 +4,13 @@ Apple Mail MCP Server
 Exposes read-only access to Apple Mail via the Model Context Protocol so
 Claude Desktop can search and read emails.
 
-Communication with Mail.app is done through AppleScript/JXA, so there is
-no need for Full Disk Access.  Mail.app must be running, and macOS
-Automation permission must be granted (System Settings -> Privacy &
-Security -> Automation) so this process can control Mail.app.
+Reads are served from Mail.app's local message store (the Envelope Index
+SQLite database plus .emlx files) when the host process has Full Disk
+Access — this is orders of magnitude faster than Apple Events.  When FDA
+is missing, reads fall back to the original AppleScript/JXA bridge.
+Writes (drafts, flags) always go through Mail.app scripting, which
+requires Mail.app running and Automation permission (System Settings ->
+Privacy & Security -> Automation).
 
 Tools provided
 --------------
@@ -15,7 +18,8 @@ Tools provided
   list_mailboxes        - All accounts / folders with counts
   search_emails         - Rich search: text, sender, date, flags, mailbox
   get_email             - Full email with decoded plain-text body
-  get_selected_emails   - Messages currently selected in Mail.app (with message:// links)
+  open_email_in_mail    - Open an email in Mail.app (bypasses blocked message:// links)
+  get_selected_emails   - Messages currently selected in Mail.app (with links)
   get_email_html        - HTML body of a specific email
   get_thread            - All emails in a conversation thread
   list_email_attachments - Enumerate attachments for an email
@@ -36,6 +40,7 @@ from __future__ import annotations
 import base64
 import email as email_lib
 import logging
+import subprocess
 import sys
 from datetime import datetime
 from typing import Optional
@@ -43,8 +48,10 @@ from urllib.parse import quote
 
 from mcp.server.fastmcp import FastMCP
 
-from .applescript import MailBridge, _FLAG_COLOR_ORDER
+from .applescript import _FLAG_COLOR_ORDER
 from .emlx import get_html_body
+from .hybrid import HybridBridge
+from .weblink import WebLinkServer
 from .models import (
     Attachment,
     AttachmentData,
@@ -70,12 +77,14 @@ logging.basicConfig(
 logger = logging.getLogger("apple_mail_mcp")
 
 # ---------------------------------------------------------------------------
-# Lazy-initialised shared state.  MailBridge init takes ~12-18s (mailbox
-# prescan) so we MUST NOT run it at import time — the MCP client would
-# time out waiting for the initialize response.
+# Lazy-initialised shared state.  HybridBridge construction is free; the
+# expensive engines underneath (JXA mailbox prescan ~12-18s, Envelope
+# Index open) are initialised lazily on first use so the MCP client never
+# times out waiting for the initialize response.
 # ---------------------------------------------------------------------------
 
-_bridge: Optional[MailBridge] = None
+_bridge: Optional[HybridBridge] = None
+_weblink: Optional[WebLinkServer] = None
 
 _VALID_FLAG_COLORS = frozenset({"red", "orange", "yellow", "green", "blue", "purple", "gray"})
 
@@ -96,26 +105,18 @@ mcp = FastMCP(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _require_bridge() -> MailBridge:
-    """Return the MailBridge instance, initialising on first call.
+def _require_bridge() -> HybridBridge:
+    """Return the shared HybridBridge, creating it on first call.
 
-    Retries on every call if init previously failed (Mail.app may have
-    been started or become responsive since the last attempt).
+    Construction never fails; each underlying engine (Envelope Index,
+    JXA) initialises lazily and raises a helpful error from the actual
+    tool call if it cannot come up.
     """
     global _bridge
-    if _bridge is not None:
-        return _bridge
-    try:
-        _bridge = MailBridge()
-        logger.info("Apple Mail MCP ready (AppleScript bridge).")
-        return _bridge
-    except (RuntimeError, OSError) as exc:
-        raise RuntimeError(
-            "Could not connect to Mail.app. Make sure Mail.app is open and "
-            "that this process has Automation permission in System Settings "
-            "-> Privacy & Security -> Automation."
-            f"\n\nUnderlying error: {exc}"
-        )
+    if _bridge is None:
+        _bridge = HybridBridge()
+        logger.info("Apple Mail MCP ready (hybrid bridge).")
+    return _bridge
 
 
 def _make_mail_link(rfc_id: Optional[str]) -> Optional[str]:
@@ -123,6 +124,24 @@ def _make_mail_link(rfc_id: Optional[str]) -> Optional[str]:
     if not rfc_id:
         return None
     return f"message://{quote(f'<{rfc_id}>', safe='')}"
+
+
+def _get_weblink() -> WebLinkServer:
+    """Shared localhost redirector for chat-clickable email links."""
+    global _weblink
+    if _weblink is None:
+        _weblink = WebLinkServer(
+            resolve_rfc_id=lambda mid: _require_bridge().get_message_id_header(mid)
+        )
+    return _weblink
+
+
+def _make_open_link(message_id: int) -> Optional[str]:
+    try:
+        return _get_weblink().open_link(message_id)
+    except Exception:
+        logger.exception("Could not build open_link for %d", message_id)
+        return None
 
 
 def _dict_to_summary(d: dict) -> EmailSummary:
@@ -157,6 +176,7 @@ def _dict_to_summary(d: dict) -> EmailSummary:
         message_id=rfc_id,
         in_reply_to=d.get("in_reply_to") or None,
         mail_link=_make_mail_link(rfc_id),
+        open_link=_make_open_link(d["id"]),
     )
 
 
@@ -212,8 +232,13 @@ def search_emails(
 ) -> SearchResult:
     """Search Apple Mail messages with flexible filters.
 
-    Results don't include mail_link for performance. Use get_email_link or
-    get_email on a specific result to get a clickable message:// URL.
+    Each result includes an open_link (localhost http:// URL) — when the
+    user wants clickable links to emails, put open_link in the response:
+    clicking it routes through the browser and pops the message open in
+    Mail.app. (mail_link, the raw message:// URL, is also included when
+    served by the fast engine, but chat UIs usually block that scheme.)
+    The open_email_in_mail tool opens a message directly without any
+    clicking.
 
     Args:
         query:           Free-text search applied to the subject line.
@@ -277,6 +302,7 @@ def search_emails(
         offset=offset,
         limit=limit,
         messages=[_dict_to_summary(r) for r in rows],
+        engine=bridge.last_engine,
     )
 
 
@@ -301,12 +327,16 @@ def get_email(message_id: int) -> EmailDetail:
     attachments = bridge.list_attachments(message_id)
     attachment_count = len(attachments)
 
+    # Only chase the flag color when the message is actually flagged —
+    # for unflagged mail (the vast majority) the color is definitionally
+    # None and the lookup would be wasted work on the JXA path.
     flag_color: Optional[str] = None
-    try:
-        flag_info = bridge.get_flag(message_id)
-        flag_color = flag_info.get("flag_color")
-    except Exception:
-        pass
+    if d.get("is_flagged"):
+        try:
+            flag_info = bridge.get_flag(message_id)
+            flag_color = flag_info.get("flag_color")
+        except Exception:
+            pass
 
     return EmailDetail(
         **summary.model_dump(),
@@ -320,9 +350,11 @@ def get_email(message_id: int) -> EmailDetail:
 
 @mcp.tool()
 def get_email_link(message_id: int) -> dict:
-    """Get a message:// URL that opens an email directly in Mail.app.
+    """Get links that open an email in Mail.app.
 
     Lightweight alternative to get_email when you only need the link.
+    Returns open_link (localhost http:// URL — clickable in chat UIs)
+    and mail_link (raw message:// URL — blocked by most chat UIs).
 
     Args:
         message_id: The integer ID from search_emails results.
@@ -334,7 +366,35 @@ def get_email_link(message_id: int) -> dict:
     return {
         "message_id": message_id,
         "mail_link": _make_mail_link(rfc_id),
+        "open_link": _make_open_link(message_id),
     }
+
+
+@mcp.tool()
+def open_email_in_mail(message_id: int) -> dict:
+    """Open an email directly in Mail.app on this Mac.
+
+    Use this when the user asks to open/show/jump to an email — it is the
+    reliable alternative to message:// links, which many chat UIs refuse
+    to open when clicked. Brings Mail.app to the foreground with the
+    message selected.
+
+    Args:
+        message_id: The integer ID from search_emails results.
+    """
+    bridge = _require_bridge()
+    rfc_id = bridge.get_message_id_header(message_id)
+    if rfc_id is None:
+        raise ValueError(f"Message {message_id} not found.")
+    link = _make_mail_link(rfc_id)
+    proc = subprocess.run(
+        ["open", link], capture_output=True, text=True, timeout=15
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Failed to open message in Mail.app: {proc.stderr.strip() or 'unknown error'}"
+        )
+    return {"message_id": message_id, "mail_link": link, "opened": True}
 
 
 @mcp.tool()
@@ -353,6 +413,8 @@ def get_selected_emails() -> list[dict]:
         haven't been sent — drafts don't get a Message-ID until send)
       - mail_link: clickable message:// URL, or null when message_id is
         empty (drafts)
+      - open_link: localhost http:// URL that opens the email in Mail.app
+        — use this for links in chat responses
 
     Returns an empty list when no message is selected.
     """
@@ -361,8 +423,9 @@ def get_selected_emails() -> list[dict]:
     out: list[dict] = []
     for r in rows:
         rfc_id = r.get("message_id") or None
+        msg_id = r.get("id")
         out.append({
-            "id": r.get("id"),
+            "id": msg_id,
             "subject": r.get("subject") or "(no subject)",
             "sender": r.get("sender") or "",
             "date_sent": r.get("date_sent"),
@@ -370,6 +433,7 @@ def get_selected_emails() -> list[dict]:
             "account": r.get("account_name") or "",
             "message_id": rfc_id,
             "mail_link": _make_mail_link(rfc_id),
+            "open_link": _make_open_link(msg_id) if msg_id is not None else None,
         })
     return out
 
