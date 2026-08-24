@@ -34,3 +34,10 @@ install.sh
 
 # Dev harness — runs MailBridge directly without MCPB rebuild; not shipped.
 tools/
+
+# Dev-only: test suites and their pytest cache.
+tests/
+.pytest_cache/
+
+# Dev-only: debugging notes for contributors, not extension documentation.
+docs/

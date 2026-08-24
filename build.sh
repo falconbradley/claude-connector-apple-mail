@@ -19,10 +19,26 @@ echo "Validating manifest…"
 mcpb validate "${SCRIPT_DIR}/manifest.json"
 echo "✓ Manifest valid."
 
+# The version lives in three files and the packer only reads one of them, so a
+# drifted manifest would ship silently mislabelled. Fail instead.
+VERSION=$(grep '^version' "${SCRIPT_DIR}/pyproject.toml" | head -1 | sed 's/version = "\(.*\)"/\1/')
+MANIFEST_VERSION=$(python3 -c "import json;print(json.load(open('${SCRIPT_DIR}/manifest.json'))['version'])")
+if [[ "${VERSION}" != "${MANIFEST_VERSION}" ]]; then
+    echo "✗ Version mismatch: pyproject.toml is ${VERSION}, manifest.json is ${MANIFEST_VERSION}." >&2
+    echo "  Set both to the same value and re-run." >&2
+    exit 1
+fi
+INIT_VERSION=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "${SCRIPT_DIR}/src/apple_mail_mcp/__init__.py")
+if [[ "${VERSION}" != "${INIT_VERSION}" ]]; then
+    echo "✗ Version mismatch: pyproject.toml is ${VERSION}, __init__.py is ${INIT_VERSION}." >&2
+    echo "  Set both to the same value and re-run." >&2
+    exit 1
+fi
+echo "✓ Version ${VERSION} consistent across pyproject.toml, manifest.json, and __init__.py."
+
 # Pack
 echo ""
 mkdir -p "${OUT}"
-VERSION=$(grep '^version' "${SCRIPT_DIR}/pyproject.toml" | head -1 | sed 's/version = "\(.*\)"/\1/')
 STABLE="${OUT}/apple-mail.mcpb"
 VERSIONED="${OUT}/apple-mail-${VERSION}.mcpb"
 mcpb pack "${SCRIPT_DIR}" "${STABLE}"
