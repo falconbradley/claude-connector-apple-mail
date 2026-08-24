@@ -218,52 +218,88 @@ def setup() -> bool:
 # Cleanup helpers (used by draft-creating tests)
 # ---------------------------------------------------------------------------
 
-def _delete_drafts_with_subject(subject: str) -> int:
-    """Delete every draft whose subject exactly matches `subject`. Returns count deleted.
+def _delete_drafts_with_subject(
+    subject: str, attempts: int = 5, delay_s: float = 0.6
+) -> int:
+    """Delete every draft whose subject exactly matches `subject` (into Trash).
 
-    Used by the draft-creation tests to keep the user's Drafts mailbox tidy.
+    Used by the draft-creating tests to keep the user's Drafts mailbox tidy.
+    Retries, because a single pass used to lose the race two different ways:
+
+      1. `draft.save()` returns before Mail has committed the draft into the
+         Drafts mailbox, so a cleanup 250 ms later could scan an empty mailbox,
+         delete nothing, and let the draft land afterwards -- stranded forever.
+      2. On an IMAP account the server echoes the draft back, so a copy can
+         reappear in Drafts after the local one was deleted.
+
+    Each pass re-resolves messages through `messages.whose({subject: ...})` --
+    the same filtered-specifier idiom the server uses -- instead of walking
+    `msgs[k]` by index and deleting in reverse. Index arithmetic against a live,
+    mutating collection was the third hazard: any message arriving mid-scan
+    shifts every later reference.
+
+    Returns the total deleted, stopping as soon as a pass sees nothing left.
     """
     safe = subject.replace("\\", "\\\\").replace('"', '\\"')
     script = f'''
     (function() {{
         var mail = Application("Mail");
-        var deleted = 0;
+        var SUBJ = "{safe}";
+        var deleted = 0, remaining = 0;
         var accts = mail.accounts();
         for (var i = 0; i < accts.length; i++) {{
-            var mboxes = accts[i].mailboxes();
+            var mboxes;
+            try {{ mboxes = accts[i].mailboxes(); }} catch(e) {{ continue; }}
             for (var j = 0; j < mboxes.length; j++) {{
                 var mname = "";
                 try {{ mname = mboxes[j].name(); }} catch(e) {{ continue; }}
                 if (mname.toLowerCase().indexOf("draft") === -1) continue;
                 try {{
-                    var msgs = mboxes[j].messages();
-                    var idxs = [];
-                    for (var k = 0; k < msgs.length; k++) {{
+                    // Let Mail resolve the match set; ask only for ids, so the
+                    // delete below targets a stable reference per message.
+                    var ids = [];
+                    try {{ ids = mboxes[j].messages.whose({{subject: SUBJ}}).id(); }}
+                    catch(e) {{ ids = []; }}
+                    for (var k = 0; k < ids.length; k++) {{
                         try {{
-                            if ((msgs[k].subject() || "") === "{safe}") idxs.push(k);
+                            var one = mboxes[j].messages.whose({{id: ids[k]}});
+                            if (one.length > 0) {{ mail.delete(one[0]); deleted++; }}
                         }} catch(e) {{}}
                     }}
-                    for (var x = idxs.length - 1; x >= 0; x--) {{
-                        try {{ mail.delete(msgs[idxs[x]]); deleted++; }} catch(e) {{}}
-                    }}
+                    try {{
+                        remaining += mboxes[j].messages
+                            .whose({{subject: SUBJ}}).length;
+                    }} catch(e) {{}}
                 }} catch(e) {{}}
             }}
         }}
-        return JSON.stringify({{deleted: deleted}});
+        return JSON.stringify({{deleted: deleted, remaining: remaining}});
     }})();
     '''
     with tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False) as f:
         f.write(script); p = f.name
+
+    import json
+    total = 0
     try:
-        proc = subprocess.run(["osascript", "-l", "JavaScript", p],
-                              capture_output=True, text=True, timeout=30)
-        if proc.returncode != 0:
-            return 0
-        import json
-        data = json.loads(proc.stdout.strip() or "{}")
-        return data.get("deleted", 0)
+        for attempt in range(1, attempts + 1):
+            proc = subprocess.run(["osascript", "-l", "JavaScript", p],
+                                  capture_output=True, text=True, timeout=30)
+            if proc.returncode != 0:
+                return total
+            data = json.loads(proc.stdout.strip() or "{}")
+            total += data.get("deleted", 0)
+            if data.get("remaining", 0) == 0:
+                return total
+            if attempt < attempts:
+                time.sleep(delay_s)
+        # Never leave the user's Drafts quietly polluted -- the original bug was
+        # silence, not the leftover itself.
+        print(f"    !  cleanup left drafts titled {subject!r} in Mail — "
+              f"delete them by hand", flush=True)
     finally:
         Path(p).unlink(missing_ok=True)
+    return total
 
 
 # ===========================================================================
