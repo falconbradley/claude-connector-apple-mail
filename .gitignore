@@ -28,8 +28,8 @@ Thumbs.db
 # Logs
 *.log
 
-# uv
-uv.lock
+# uv: uv.lock IS tracked — it pins the dependency set that ships inside
+# the .mcpb, so installs are deterministic. Do not ignore it.
 .kangentic/
 .claude/settings.local.json
 kangentic.local.json
