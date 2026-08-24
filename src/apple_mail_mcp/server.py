@@ -46,7 +46,14 @@ from datetime import datetime
 from typing import Optional
 from urllib.parse import quote
 
-from mcp.server.fastmcp import FastMCP
+# The ergonomic server class was renamed in MCP SDK 2.0: ``mcp.server.fastmcp``
+# went away and ``FastMCP`` became ``mcp.server.mcpserver.MCPServer``. The
+# constructor, ``.tool()`` and ``.run()`` are unchanged, so accept either — the
+# dependency floor is old enough that both are in range for a fresh resolve.
+try:
+    from mcp.server.mcpserver import MCPServer as _Server  # MCP SDK >= 2.0
+except ImportError:  # pragma: no cover - depends on the resolved SDK version
+    from mcp.server.fastmcp import FastMCP as _Server  # MCP SDK < 2.0
 
 from .applescript import _FLAG_COLOR_ORDER
 from .emlx import get_html_body
@@ -89,10 +96,10 @@ _weblink: Optional[WebLinkServer] = None
 _VALID_FLAG_COLORS = frozenset({"red", "orange", "yellow", "green", "blue", "purple", "gray"})
 
 # ---------------------------------------------------------------------------
-# FastMCP app
+# MCP app
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP(
+mcp = _Server(
     "Apple Mail",
     instructions=(
         "Access to Apple Mail on this Mac via Mail.app. "
