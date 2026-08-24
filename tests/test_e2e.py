@@ -18,9 +18,19 @@ Mail.app load is kept gentle by:
 
 Usage:
     uv run python tests/test_e2e.py
+
+This is a standalone script with its own runner and result table, not a pytest
+module -- the `@test(group, name)` decorator below registers into `_registry`
+and every case body is an anonymous `def _()`. The filename still matches
+pytest's `test_*.py` discovery pattern, so `__test__ = False` opts the module
+out; without it, collection fails on the `test` decorator factory with
+"fixture 'group' not found".
 """
 
 from __future__ import annotations
+
+# Not a pytest module -- see the Usage note above.
+__test__ = False
 
 import subprocess
 import sys

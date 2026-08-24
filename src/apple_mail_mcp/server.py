@@ -42,7 +42,7 @@ import email as email_lib
 import logging
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import quote
 
@@ -55,6 +55,7 @@ try:
 except ImportError:  # pragma: no cover - depends on the resolved SDK version
     from mcp.server.fastmcp import FastMCP as _Server  # MCP SDK < 2.0
 
+from . import __version__
 from .applescript import _FLAG_COLOR_ORDER
 from .emlx import get_html_body
 from .hybrid import HybridBridge
@@ -107,6 +108,17 @@ mcp = _Server(
         "list and retrieve attachments, and create draft emails."
     ),
 )
+
+# Neither FastMCP nor MCPServer takes a ``version``, and the lowlevel server they
+# wrap falls back to the *SDK* version when none is set -- so the initialize
+# response advertised the ``mcp`` package version (e.g. "1.27.0") as ours, which
+# is actively misleading in Claude's MCP panel. Stamp our own on the wrapped
+# server, tolerating either SDK layout rather than assuming the private name.
+_lowlevel = getattr(mcp, "_mcp_server", None)
+if _lowlevel is not None:
+    _lowlevel.version = __version__
+else:  # pragma: no cover - only on an SDK that renames the wrapped server
+    logger.debug("Could not stamp server version %s: no wrapped server", __version__)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -226,6 +238,29 @@ def list_mailboxes() -> list[Mailbox]:
     ]
 
 
+def _parse_iso_utc(value: str, field: str) -> datetime:
+    """Parse an ISO-8601 date/datetime filter into an aware UTC datetime.
+
+    Every timestamp this server emits is UTC (EnvelopeEngine._to_iso renders
+    with ``tz=timezone.utc``, and the JXA fallback uses ``toISOString()``), so a
+    value that carries no offset is read as UTC as well.  Without that, naive
+    input silently meant *local* midnight -- ``datetime.timestamp()`` resolves a
+    naive datetime against the host zone -- so ``since="2026-08-24T00:00:00"``
+    excluded a message stamped ``2026-08-24T03:33Z`` and the search came back
+    empty.  Pass an explicit offset to filter on a local wall clock instead.
+    """
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(
+            f"Invalid {field!r} date: {value!r}. Use ISO-8601 format, e.g. "
+            "'2026-08-24', '2026-08-24T03:33:00Z' or '2026-08-23T20:33:00-07:00'."
+        ) from None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 @mcp.tool()
 def search_emails(
     query: Optional[str] = None,
@@ -259,8 +294,14 @@ def search_emails(
         from_address:    Substring match on sender name or address.
         to_address:      Substring match on To/CC recipient addresses (e.g. "bill@example.com").
         subject:         Substring match on subject line.
-        since:           ISO-8601 date/datetime -- only messages after this time.
+        since:           ISO-8601 date/datetime -- only messages at or after this
+                         time. Interpreted as UTC when no offset is given, which
+                         matches the UTC date_sent/date_received in results, so a
+                         value copied from a result round-trips exactly. For a
+                         local-wall-clock window (e.g. "today" as the user sees it
+                         in Mail.app) pass the offset: "2026-08-24T00:00:00-07:00".
         before:          ISO-8601 date/datetime -- only messages before this time.
+                         Same UTC-by-default rule as `since`.
         unread_only:     If true, return only unread messages.
         flagged_only:    If true, return only flagged messages.
         has_attachments: If true/false, filter on attachment presence. Needs
@@ -277,15 +318,9 @@ def search_emails(
     since_dt: Optional[datetime] = None
     before_dt: Optional[datetime] = None
     if since:
-        try:
-            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
-        except ValueError:
-            raise ValueError(f"Invalid 'since' date: {since!r}. Use ISO-8601 format.")
+        since_dt = _parse_iso_utc(since, "since")
     if before:
-        try:
-            before_dt = datetime.fromisoformat(before.replace("Z", "+00:00"))
-        except ValueError:
-            raise ValueError(f"Invalid 'before' date: {before!r}. Use ISO-8601 format.")
+        before_dt = _parse_iso_utc(before, "before")
 
     # The 'query' param is a convenience that searches both subject and sender
     subject_contains: Optional[str] = query

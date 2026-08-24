@@ -26,6 +26,18 @@ Packaged as an [MCPB desktop extension](https://support.claude.com/en/articles/1
 | `get_email_flag` | Get the flag status and color (e.g. `"orange"`) for an email |
 | `set_email_flag` | Set or remove a color flag on an email (red/orange/yellow/green/blue/purple/gray, or null to remove) |
 
+### Timestamps are UTC
+
+Every timestamp the server returns (`date_sent`, `date_received`) is UTC, and the
+`since` / `before` filters read a value with no offset as UTC to match — so a
+`date_sent` copied out of a result round-trips exactly. To filter on a local wall
+clock (e.g. "today" as it reads in Mail.app), pass the offset explicitly:
+
+```
+since = "2026-08-24T00:00:00-07:00"   # local midnight
+since = "2026-08-24T00:00:00"         # UTC midnight — 17:00 the previous day in PDT
+```
+
 ## How it works
 
 Mail.app remains the **sync and auth engine** — it holds your Apple ID / iCloud credentials natively and continuously mirrors every account to disk. This server has two engines on top of that:
