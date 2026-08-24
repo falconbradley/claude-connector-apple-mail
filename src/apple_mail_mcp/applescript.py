@@ -33,6 +33,37 @@ logger = logging.getLogger("apple_mail_mcp.applescript")
 
 _RE_PREFIX = re.compile(r"^(Re|Fwd|Fw)\s*:\s*", re.IGNORECASE)
 
+# MCP clients abandon a tool call after 60s. Any JXA work that runs past that
+# is wasted: the client has already reported "Request timed out", while
+# osascript keeps holding Mail.app busy and slowing down the next call. Keep
+# the whole read path inside this budget so we return an actionable error
+# instead of being killed mid-flight.
+_MCP_CLIENT_TIMEOUT_S = 60.0
+# Leave headroom for JSON encode + transport so we surface our own error
+# rather than being cut off by the client.
+_FALLBACK_BUDGET_S = _MCP_CLIENT_TIMEOUT_S - 5.0
+# Below this much remaining budget, skip the (optional) display-property round
+# rather than start something that will be killed halfway.
+_R2_MIN_S = 8.0
+
+_FDA_HINT = (
+    "This is the slow AppleScript fallback. Grant Full Disk Access to the uv "
+    "launcher to enable the fast local-store path, which serves the same "
+    "search in milliseconds — see the Permissions section of the README."
+)
+
+
+class _Deadline:
+    """Shared wall-clock budget across the several JXA calls that make up one
+    tool call, so their combined runtime stays under the client's timeout."""
+
+    def __init__(self, budget: float = _FALLBACK_BUDGET_S) -> None:
+        self._expires_at = time.monotonic() + budget
+
+    def remaining(self) -> float:
+        return self._expires_at - time.monotonic()
+
+
 # Flag color name → flagIndex integer (-1 = no flag, 0–6 = red … gray).
 # Mail.app's flagIndex property is 0-based: 0=red, 1=orange, …, 6=gray.
 _FLAG_COLOR_MAP: dict[str, int] = {
@@ -159,7 +190,10 @@ class MailBridge:
         })();
         """
         try:
-            result = self._run_jxa(init_script, timeout=120)
+            # Must stay well under the client's 60s: this prescan runs lazily
+            # on the first tool call, and whatever it spends is taken out of
+            # that same call's budget before the actual query even starts.
+            result = self._run_jxa(init_script, timeout=40)
         except RuntimeError:
             raise RuntimeError(
                 "Mail.app is not running. Please open Mail.app and try again."
@@ -183,15 +217,35 @@ class MailBridge:
     # JXA execution
     # ------------------------------------------------------------------
 
-    def _run_jxa(self, script: str, timeout: int = 30) -> Any:
+    def _run_jxa(
+        self,
+        script: str,
+        timeout: int = 30,
+        deadline: Optional[_Deadline] = None,
+    ) -> Any:
         """Execute JXA script via osascript, return parsed JSON.
 
         The script MUST produce a JSON string as its final expression
         (typically via ``JSON.stringify(...)``).
 
+        Args:
+            timeout: per-call ceiling, in seconds.
+            deadline: optional budget shared with the other JXA calls in this
+                tool call. ``timeout`` is clamped to whatever it has left, so
+                the total can never overrun the MCP client's own timeout.
+
         Raises:
             RuntimeError: on timeout, permission error, or non-zero exit.
         """
+        if deadline is not None:
+            remaining = deadline.remaining()
+            if remaining <= 0:
+                raise RuntimeError(
+                    "Search exceeded its time budget before completing. "
+                    f"{_FDA_HINT}"
+                )
+            timeout = max(1, min(timeout, int(remaining)))
+
         truncated = script[:200].replace("\n", " ")
         logger.debug("Running JXA: %s ...", truncated)
 
@@ -216,6 +270,14 @@ class MailBridge:
         except subprocess.TimeoutExpired:
             elapsed = time.monotonic() - t0
             logger.warning("JXA script timed out after %.1fs", elapsed)
+            if deadline is not None:
+                # Budgeted read: we ran out of time rather than Mail.app
+                # having wedged. Say so, and point at the real fix.
+                raise RuntimeError(
+                    f"This search is too slow to complete in {timeout}s against "
+                    "a mailbox this size. Narrow it (add a mailbox, a date "
+                    f"range, or a sender) or speed it up: {_FDA_HINT}"
+                )
             raise RuntimeError(
                 f"Mail.app is not responding (timed out after {timeout}s). "
                 "It may be busy or frozen — try again in a moment."
@@ -398,7 +460,25 @@ class MailBridge:
 
         In "query" mode (subject_contains == sender_contains), matches
         subject OR sender.  When set separately, both must match (AND).
+
+        Raises:
+            RuntimeError: if ``has_attachments`` is given (unsupported here —
+                see below), or if the search cannot finish inside the budget.
         """
+        # Mail.app's scripting interface exposes no bulk "has attachments"
+        # property, and reading mailAttachments per message costs minutes on a
+        # large mailbox. Rather than silently returning unfiltered results as
+        # if they had been filtered, refuse the filter outright.
+        if has_attachments is not None:
+            raise RuntimeError(
+                "Filtering by attachment presence is not supported on the "
+                f"AppleScript fallback. {_FDA_HINT}"
+            )
+
+        # One budget for both rounds, so a slow Round 1 cannot leave Round 2
+        # running past the point where the client has already given up.
+        budget = _Deadline()
+
         # Account / mailbox JS filters
         acct_filter = ""
         if account_name:
@@ -577,7 +657,7 @@ class MailBridge:
         }})();
         """
 
-        r1 = self._run_jxa(script_r1, timeout=300)
+        r1 = self._run_jxa(script_r1, timeout=int(_FALLBACK_BUDGET_S), deadline=budget)
         if r1 is None:
             return 0, []
 
@@ -655,9 +735,28 @@ class MailBridge:
         }})();
         """
 
-        r2 = self._run_jxa(script_r2, timeout=300)
-        if r2 is None:
-            r2 = {}
+        # Round 2 only decorates the page with display properties — Round 1
+        # already did the expensive scan and picked the results. Never let this
+        # cheap last step sink a search we've already paid for: if the budget
+        # can't cover it, return the Round 1 fields we do have. When the caller
+        # filtered on subject/sender those are already populated, so the
+        # degraded result is often indistinguishable from the full one.
+        r2: dict = {}
+        if budget.remaining() >= _R2_MIN_S:
+            try:
+                r2 = self._run_jxa(
+                    script_r2, timeout=int(_FALLBACK_BUDGET_S), deadline=budget
+                ) or {}
+            except RuntimeError as exc:
+                logger.warning(
+                    "Round 2 gave up (%s); returning Round 1 fields only.", exc
+                )
+        else:
+            logger.warning(
+                "Skipping Round 2 — only %.1fs of budget left; returning "
+                "Round 1 fields only.",
+                budget.remaining(),
+            )
 
         # ---------------------------------------------------------------
         # Merge Round 1 + Round 2 into final results
@@ -679,7 +778,10 @@ class MailBridge:
                 "date_sent": dr_str,  # approximate; use get_email for exact
                 "is_read": item.get("read") if "read" in item else extra.get("read", True),
                 "is_flagged": item.get("flag") if "flag" in item else extra.get("flag", False),
-                "has_attachments": False,
+                # None = unknown: this path never reads attachment state, and
+                # reporting False would assert something we haven't checked.
+                # Use get_email for an authoritative answer.
+                "has_attachments": None,
                 "mailbox_name": item["mbName"],
                 "account_name": item["acctName"],
                 "message_id": None,

@@ -26,7 +26,9 @@ class EmailSummary(BaseModel):
     date_received: Optional[datetime] = None
     is_read: bool = True
     is_flagged: bool = False
-    has_attachments: bool = False
+    # None = not determined. The AppleScript fallback's search path does not
+    # read attachment state; only the fast engine and get_email do.
+    has_attachments: Optional[bool] = None
     size: int = 0
     message_id: Optional[str] = None   # RFC 2822 Message-ID header
     in_reply_to: Optional[str] = None

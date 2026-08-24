@@ -171,7 +171,12 @@ def _dict_to_summary(d: dict) -> EmailSummary:
         date_received=date_received,
         is_read=bool(d.get("is_read", True)),
         is_flagged=bool(d.get("is_flagged", False)),
-        has_attachments=bool(d.get("has_attachments", False)),
+        # Preserve None ("not determined") instead of flattening it to False —
+        # the fallback search path genuinely does not know.
+        has_attachments=(
+            None if d.get("has_attachments") is None
+            else bool(d["has_attachments"])
+        ),
         size=d.get("size", 0),
         message_id=rfc_id,
         in_reply_to=d.get("in_reply_to") or None,
@@ -251,7 +256,11 @@ def search_emails(
         before:          ISO-8601 date/datetime -- only messages before this time.
         unread_only:     If true, return only unread messages.
         flagged_only:    If true, return only flagged messages.
-        has_attachments: If true/false, filter on attachment presence.
+        has_attachments: If true/false, filter on attachment presence. Needs
+                         the fast engine; errors on the AppleScript fallback
+                         rather than returning unfiltered results. Results also
+                         report has_attachments=null on that fallback, meaning
+                         "not determined" — use get_email to check one message.
         limit:           Max results per page (default 25, max 200).
         offset:          Pagination offset.
     """

@@ -54,6 +54,12 @@ There is also an `open_email_in_mail` tool so Claude can jump to a message direc
 
 When Full Disk Access is missing, reads transparently fall back to the original **JXA (JavaScript for Automation)** bridge (the two-round bulk-fetch search, ~37s across 60k+ messages). Search results include an `engine` field (`"sqlite"` or `"applescript"`) so you can tell which path served them. Set `APPLE_MAIL_MCP_DISABLE_FAST=1` to force the JXA path.
 
+The fallback scales poorly, and past a couple hundred thousand messages some searches simply cannot finish in time. MCP clients abandon a tool call after 60s, so the fallback holds itself to a **55s budget** shared across both rounds:
+
+- **Round 1 overruns the budget** → the search fails with an error naming the cause and suggesting how to narrow it. Previously the internal limit was 300s, so the client timed out at 60s while `osascript` kept running for another four minutes, holding Mail.app busy and slowing every later call.
+- **Only Round 2 (display properties) is left short** → results are returned with just the Round 1 fields rather than failing. When you filtered on subject or sender those are already populated, so the degraded result usually looks identical to the full one.
+- **`has_attachments` is rejected outright.** Mail.app exposes no bulk attachment property and reading it per message costs minutes, so this filter needs the fast engine. On the fallback it raises instead of silently returning unfiltered results, and search results report `has_attachments: null` ("not determined") rather than a misleading `false` — use `get_email` for an authoritative answer on one message.
+
 Writes — drafts, reply drafts, flag changes — always go through Mail.app scripting (Automation permission), so Mail.app owns every mutation and syncs it back to the server (e.g. iCloud) itself.
 
 ---
