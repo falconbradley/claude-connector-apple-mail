@@ -184,8 +184,16 @@ def setup() -> bool:
     if unflagged:
         UNFLAGGED_ID = unflagged[0]["id"]
         RECENT_ID = unflagged[0]["id"]   # reuse for recent
-    _, attached = BRIDGE.search_messages(mailbox_name="INBOX", has_attachments=True, since=since_recent, limit=1)
-    if attached: ATTACHMENT_ID = attached[0]["id"]
+    # has_attachments is unsupported on the JXA bridge (it now raises rather
+    # than silently returning unfiltered results), so this fixture is simply
+    # unavailable here. Tests that need it skip.
+    try:
+        _, attached = BRIDGE.search_messages(
+            mailbox_name="INBOX", has_attachments=True, since=since_recent, limit=1
+        )
+        if attached: ATTACHMENT_ID = attached[0]["id"]
+    except RuntimeError as exc:
+        print(f"No attachment fixture (JXA bridge): {exc}", flush=True)
     THREAD_ID = RECENT_ID  # any message id can seed a thread query
 
     print(
@@ -498,9 +506,8 @@ def _():
     if ATTACHMENT_ID is None: skip("no message-with-attachment fixture")
     _throttle()
     atts = BRIDGE.list_attachments(ATTACHMENT_ID)
-    # The fixture lookup uses search_messages(has_attachments=True) which can
-    # occasionally return false positives on certain mailbox types. If that
-    # happens, the tool itself isn't broken — skip rather than fail.
+    # Belt-and-braces: the fixture is only set when a real engine confirmed
+    # attachments, but a message can lose them between lookup and here.
     if len(atts) == 0:
         skip(f"fixture {ATTACHMENT_ID} reports has_attachments=True but list_attachments() found 0")
     a = atts[0]
