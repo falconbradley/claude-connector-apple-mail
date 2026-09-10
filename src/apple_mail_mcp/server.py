@@ -135,6 +135,20 @@ if _lowlevel is not None:
 else:  # pragma: no cover - only on an SDK that renames the wrapped server
     logger.debug("Could not stamp server version %s: no wrapped server", __version__)
 
+# Claude Desktop's MCP log stopped recording tools/call payloads, so log the
+# tool name and arguments ourselves (stderr lands in that same log). Wraps a
+# private ToolManager method; if the SDK renames it we just lose the line.
+try:
+    _orig_call_tool = mcp._tool_manager.call_tool
+
+    async def _logged_call_tool(name, arguments, *args, **kwargs):
+        logger.info("tools/call %s %s", name, arguments)
+        return await _orig_call_tool(name, arguments, *args, **kwargs)
+
+    mcp._tool_manager.call_tool = _logged_call_tool
+except AttributeError:  # pragma: no cover - SDK layout changed
+    logger.debug("Tool-call logging unavailable on this SDK.")
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -413,13 +427,14 @@ def _load_email_detail(message_id: int) -> tuple[dict, list[dict], EmailDetail]:
 
 @mcp.tool()
 def get_email(message_id: int) -> EmailDetail:
-    """Fetch a single email with full plain-text body and header details.
+    """Read an email's plain-text body and headers for your own use (to SHOW
+    the email to the user, call preview_email instead — it renders a card).
 
-    The response includes a mail_link field with a message:// URL that
-    opens the email directly in Mail.app when clicked.
-
-    This returns text only. If the user wants to *see* the email in the
-    chat, call preview_email instead — same data, plus an inline card.
+    Returns text only: subject, sender, recipients, dates, flags, body_text,
+    attachment_count, and a mail_link (message:// URL that opens the email
+    in Mail.app). Right for summarizing, extracting, or answering questions
+    about a message. When the user says "show me", "pull up", "open", or
+    "let me see" an email, use preview_email — same data plus an inline card.
 
     Args:
         message_id: The integer ID from search_emails results.
@@ -445,7 +460,9 @@ def email_preview_resource() -> str:
 
 
 @mcp.tool(
-    meta={"ui": {"resourceUri": UI_RESOURCE_URI}},
+    # Nested form is the spec; the flat key is the pre-GA format some hosts
+    # still read (the SDK tells hosts to check both). Advertise both.
+    meta={"ui": {"resourceUri": UI_RESOURCE_URI}, "ui/resourceUri": UI_RESOURCE_URI},
     structured_output=False,
 )
 def preview_email(message_id: int) -> CallToolResult:

@@ -239,7 +239,8 @@ async def test_tool_advertises_its_ui_resource(session_factory):
     by_name = {t.name: t for t in tools}
     assert "preview_email" in by_name
     meta = by_name["preview_email"].meta
-    assert meta == {"ui": {"resourceUri": UI_RESOURCE_URI}}
+    assert meta["ui"] == {"resourceUri": UI_RESOURCE_URI}
+    assert meta["ui/resourceUri"] == UI_RESOURCE_URI  # legacy key some hosts read
     # get_email stays a plain text tool; only the preview renders a card.
     assert not (by_name["get_email"].meta or {}).get("ui")
 
