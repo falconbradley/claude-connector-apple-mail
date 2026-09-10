@@ -167,6 +167,22 @@ def _require_bridge() -> HybridBridge:
     return _bridge
 
 
+def _optional(value: Optional[str]) -> Optional[str]:
+    """Normalise an optional string argument from the MCP client.
+
+    Claude Desktop sometimes sends the *string* "null" (or "None", or "")
+    for a parameter it means to leave unset -- seen in the wild as
+    ``search_emails(query="null", ...)``, which then filtered subjects for
+    the word "null". Treat those spellings as absent.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped or stripped.lower() in ("null", "none"):
+        return None
+    return value
+
+
 def _make_mail_link(rfc_id: Optional[str]) -> Optional[str]:
     """Build a message:// URL from an RFC 2822 Message-ID."""
     if not rfc_id:
@@ -342,6 +358,11 @@ def search_emails(
         offset:          Pagination offset.
     """
     bridge = _require_bridge()
+
+    # "null"/"None"/"" from the client mean "no filter", not a literal match.
+    query, mailbox, account = _optional(query), _optional(mailbox), _optional(account)
+    from_address, to_address = _optional(from_address), _optional(to_address)
+    subject, since, before = _optional(subject), _optional(since), _optional(before)
 
     # Parse dates
     since_dt: Optional[datetime] = None
@@ -737,6 +758,7 @@ def set_email_flag(
         flag: Flag color to set: "red", "orange", "yellow", "green", "blue",
               "purple", or "gray". Pass null/None to remove the flag.
     """
+    flag = _optional(flag)  # "null" from the client means remove, as documented
     if flag is not None and flag not in _VALID_FLAG_COLORS:
         raise ValueError(
             f"Invalid flag color {flag!r}. "
