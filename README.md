@@ -14,6 +14,7 @@ Packaged as an [MCPB desktop extension](https://support.claude.com/en/articles/1
 | `list_mailboxes` | Every account/folder with message counts |
 | `search_emails` | Rich search: free text, sender, recipient (To/CC), subject, date range, read/flagged status, attachments. Every result includes clickable open-in-Mail links |
 | `get_email` | Full email with decoded plain-text body, recipients, flag color, and metadata |
+| `preview_email` | Show an email as an inline preview card in the chat — sender, recipients, date, flags, attachments, rendered body, and an Open-in-Mail button. Same JSON as `get_email` for the model |
 | `get_email_link` | Get a `message://` URL that opens the email directly in Mail.app |
 | `open_email_in_mail` | Open an email directly in Mail.app (for chat UIs that block `message://` links) |
 | `get_selected_emails` | The message(s) currently selected in Mail.app's viewer — id, subject, sender, mailbox, and open-in-Mail links |
@@ -52,6 +53,34 @@ Reads are served directly from Mail.app's local message store:
 No credentials are ever handled: the server is a read-only consumer of data Mail.app has already synced. The store is opened read-only (`PRAGMA query_only`) and never mutated. The only extra requirement is **Full Disk Access**, granted once in System Settings — see [Permissions](#permissions) for the `uv` gotcha.
 
 The schema of the Envelope Index varies across macOS releases, so the server introspects it at runtime and adapts (falling back to the documented `flags` bitfield when dedicated columns are absent). Account UUIDs in mailbox URLs are resolved to display names ("iCloud", "Work Gmail") via the system accounts store. Run `uv run python -m apple_mail_mcp.selftest` from a terminal with Full Disk Access to verify the fast path on your machine.
+
+### Inline email previews (MCP Apps)
+
+`preview_email` renders a message as a card directly in the chat transcript, the
+way the Gmail and Superhuman connectors do. It uses the
+[MCP Apps extension](https://github.com/modelcontextprotocol/ext-apps): the
+server ships a `ui://apple-mail/email-preview` HTML resource, the tool points at
+it via `_meta.ui.resourceUri`, and hosts that support the extension (Claude
+Desktop, claude.ai) load it in a sandboxed iframe beside the tool call and feed
+it the tool's `structuredContent`.
+
+- The card shows sender (with avatar), recipients, date in the host's locale and
+  time zone, unread/flag state, attachment chips, and the body. HTML mail is
+  sanitized client-side (allowlisted tags and attributes, `javascript:` and
+  `data:` links stripped, inline styles scrubbed of `url()`/`expression()`); plain
+  text is linkified with quoted lines styled. A toggle switches between the two.
+- **Open in Mail** goes through the host's `ui/open-link` to the connector's
+  localhost redirector, which pops the message open in Mail.app.
+- Remote images are never loaded. The card declares no CSP allowances, so the
+  host runs it under the strictest default: no network, no nested frames.
+  Tracking pixels are dropped; other remote images become labelled placeholders.
+- The model only sees `get_email`-shaped JSON in the tool's text content. The
+  HTML body rides in `structuredContent`, which goes to the iframe, not the
+  model's context.
+- Hosts without MCP Apps ignore the UI hint and get a normal text result.
+
+The card lives in `src/apple_mail_mcp/ui/email_preview.html` as one
+self-contained document — no SDK, no external assets.
 
 ### Clickable open-in-Mail links
 
@@ -175,8 +204,14 @@ apple-mail-mcp/
     └── apple_mail_mcp/
         ├── __init__.py
         ├── server.py          # MCP tools (FastMCP)
+        ├── hybrid.py          # Fast SQLite reads with JXA fallback
+        ├── envelope.py        # Envelope Index (SQLite) read engine
         ├── applescript.py     # JXA bridge to Mail.app
         ├── emlx.py            # MIME body extraction utilities
+        ├── weblink.py         # Localhost redirector for open-in-Mail links
+        ├── preview.py         # Inline preview card payload + ui:// resource
+        ├── ui/
+        │   └── email_preview.html  # The MCP Apps card (self-contained)
         └── models.py          # Pydantic data models
 ```
 
@@ -207,6 +242,7 @@ Times measured against ~61K messages across 7 mailboxes. Searches without option
 - [x] Thread view
 - [x] List and retrieve attachments
 - [x] `message://` links to open emails in Mail.app
+- [x] Inline email preview cards in the chat (MCP Apps)
 
 **Phase 2 — Write (in progress)**
 - [x] Create draft emails (saved to Drafts with a `message://` link to open)
@@ -223,6 +259,7 @@ Times measured against ~61K messages across 7 mailboxes. Searches without option
 - Read operations never modify your mail: the Envelope Index is opened with `PRAGMA query_only` and `.emlx` files are only ever read. Write operations go through Mail.app scripting and are limited to: creating drafts (saved locally, never sent automatically) and setting/removing flags on messages.
 - No data leaves your machine — this is a local MCP server. Mail.app keeps sole custody of account credentials (iCloud sign-in, OAuth, etc.).
 - The open-in-Mail link redirector binds to 127.0.0.1 only, requires a per-install random token on every request, and can only focus Mail.app on a message — it never serves message content.
+- The inline preview card runs in the host's sandboxed iframe with no network access; email HTML is sanitized before rendering and remote images are never fetched, so a message can't phone home when previewed.
 - Full Disk Access (read-only usage) powers the fast search path; without it the extension degrades to Automation-only scripting.
 - macOS-only (`"platforms": ["darwin"]` in manifest).
 - Attachment data is returned as base64 only when explicitly requested.

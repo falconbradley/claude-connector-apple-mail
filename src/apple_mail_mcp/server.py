@@ -18,6 +18,7 @@ Tools provided
   list_mailboxes        - All accounts / folders with counts
   search_emails         - Rich search: text, sender, date, flags, mailbox
   get_email             - Full email with decoded plain-text body
+  preview_email         - Same data, plus an inline preview card in the chat (MCP Apps)
   open_email_in_mail    - Open an email in Mail.app (bypasses blocked message:// links)
   get_selected_emails   - Messages currently selected in Mail.app (with links)
   get_email_html        - HTML body of a specific email
@@ -55,10 +56,21 @@ try:
 except ImportError:  # pragma: no cover - depends on the resolved SDK version
     from mcp.server.fastmcp import FastMCP as _Server  # MCP SDK < 2.0
 
+from mcp.types import CallToolResult
+
 from . import __version__
 from .applescript import _FLAG_COLOR_ORDER
 from .emlx import get_html_body
 from .hybrid import HybridBridge
+from .preview import (
+    UI_MIME_TYPE,
+    UI_RESOURCE_META,
+    UI_RESOURCE_URI,
+    build_preview_payload,
+    build_preview_result,
+    extract_html_body,
+    load_preview_html,
+)
 from .weblink import WebLinkServer
 from .models import (
     Attachment,
@@ -105,7 +117,10 @@ mcp = _Server(
     instructions=(
         "Access to Apple Mail on this Mac via Mail.app. "
         "You can list mailboxes, search emails, read message bodies, "
-        "list and retrieve attachments, and create draft emails."
+        "list and retrieve attachments, and create draft emails. "
+        "When the user wants to see an email (\"show me\", \"pull up\", "
+        "\"preview\"), call preview_email: it renders the message as a card "
+        "in the chat. Use get_email when you only need the content yourself."
     ),
 )
 
@@ -357,15 +372,11 @@ def search_emails(
     )
 
 
-@mcp.tool()
-def get_email(message_id: int) -> EmailDetail:
-    """Fetch a single email with full plain-text body and header details.
+def _load_email_detail(message_id: int) -> tuple[dict, list[dict], EmailDetail]:
+    """Fetch a message and assemble its EmailDetail.
 
-    The response includes a mail_link field with a message:// URL that
-    opens the email directly in Mail.app when clicked.
-
-    Args:
-        message_id: The integer ID from search_emails results.
+    Returns the raw bridge dict and attachment list too, so callers that
+    need more than the model (the preview card) don't re-query Mail.
     """
     bridge = _require_bridge()
 
@@ -389,7 +400,7 @@ def get_email(message_id: int) -> EmailDetail:
         except Exception:
             pass
 
-    return EmailDetail(
+    detail = EmailDetail(
         **summary.model_dump(),
         to_addresses=d.get("to_recipients", []),
         cc_addresses=d.get("cc_recipients", []),
@@ -397,6 +408,88 @@ def get_email(message_id: int) -> EmailDetail:
         attachment_count=attachment_count,
         flag_color=flag_color,
     )
+    return d, attachments, detail
+
+
+@mcp.tool()
+def get_email(message_id: int) -> EmailDetail:
+    """Fetch a single email with full plain-text body and header details.
+
+    The response includes a mail_link field with a message:// URL that
+    opens the email directly in Mail.app when clicked.
+
+    This returns text only. If the user wants to *see* the email in the
+    chat, call preview_email instead — same data, plus an inline card.
+
+    Args:
+        message_id: The integer ID from search_emails results.
+    """
+    _, _, detail = _load_email_detail(message_id)
+    return detail
+
+
+@mcp.resource(
+    UI_RESOURCE_URI,
+    name="email_preview",
+    title="Email preview card",
+    description=(
+        "Interactive card that renders one email inline in the chat: sender, "
+        "recipients, date, flags, attachments, the message body, and an "
+        "Open-in-Mail button. Rendered by hosts that support MCP Apps."
+    ),
+    mime_type=UI_MIME_TYPE,
+    meta=UI_RESOURCE_META,
+)
+def email_preview_resource() -> str:
+    return load_preview_html()
+
+
+@mcp.tool(
+    meta={"ui": {"resourceUri": UI_RESOURCE_URI}},
+    structured_output=False,
+)
+def preview_email(message_id: int) -> CallToolResult:
+    """Show an email to the user as an inline preview card in the chat.
+
+    Renders the message the way Mail.app would: sender with avatar,
+    recipients, date, unread/flag state, attachment chips, the body (rich
+    HTML when the message has one, sanitized; plain text otherwise) and an
+    "Open in Mail" button that jumps to the message in Mail.app. In chat
+    clients without inline cards the tool degrades to the same JSON as
+    get_email.
+
+    Use this whenever the user asks to see, show, pull up, open, or preview
+    a specific email — e.g. "show me the latest email from Alice", "pull up
+    that invoice", "let me see it". Use get_email when you only need to
+    read the content yourself (summarize, extract, answer a question).
+
+    Agent guidance: the card already displays the message, so don't repeat
+    the body in your reply — a one-line summary or the answer to the user's
+    question is enough.
+
+    Args:
+        message_id: The integer ID from search_emails results.
+    """
+    d, attachments, detail = _load_email_detail(message_id)
+    bridge = _require_bridge()
+
+    # The HTML body is an extra read (message source) that get_email never
+    # does; it lives only in structuredContent, so the model never pays for it.
+    body_html: Optional[str] = None
+    try:
+        body_html = extract_html_body(bridge.get_message_source(message_id))
+    except Exception:
+        logger.exception("Could not read HTML body for %d; card shows text.", message_id)
+
+    payload = build_preview_payload(
+        d,
+        attachments=attachments,
+        flag_color=detail.flag_color,
+        body_html=body_html,
+        mail_link=detail.mail_link,
+        open_link=detail.open_link,
+    )
+    return build_preview_result(payload, detail.model_dump(mode="json"))
 
 
 @mcp.tool()

@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apple Mail — Email Preview</title>
+<!--
+  MCP App (SEP-1865) for the Apple Mail connector.
+
+  Claude renders this document in a sandboxed iframe when the `preview_email`
+  tool runs. The host speaks JSON-RPC 2.0 over window.postMessage; we do the
+  handshake by hand (no SDK) so the file stays a single self-contained HTML
+  document that satisfies the restrictive default CSP:
+
+      default-src 'none'; script-src 'self' 'unsafe-inline';
+      style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'
+
+  Nothing here loads from the network. Email HTML is sanitized client-side
+  before it touches the DOM; remote images can't load under the CSP anyway,
+  so they're replaced with placeholders rather than broken-image icons.
+-->
+<style>
+  :root {
+    /* Fallbacks for every host variable we rely on (spec: Views must
+       degrade gracefully when the host omits `styles`). */
+    --color-background-primary: light-dark(#ffffff, #1f1f1f);
+    --color-background-secondary: light-dark(#f5f5f4, #2a2a2a);
+    --color-background-tertiary: light-dark(#ebebea, #343434);
+    --color-background-info: light-dark(#e8f1fb, #1d2b3a);
+    --color-background-danger: light-dark(#fdecec, #3a1f1f);
+    --color-text-primary: light-dark(#1a1a1a, #f2f2f2);
+    --color-text-secondary: light-dark(#5c5c5c, #b3b3b3);
+    --color-text-tertiary: light-dark(#8a8a8a, #8a8a8a);
+    --color-text-info: light-dark(#1d5fa8, #8ab8ee);
+    --color-text-danger: light-dark(#b42318, #f39a92);
+    --color-border-primary: light-dark(#e2e2e0, #3a3a3a);
+    --color-border-secondary: light-dark(#ececeb, #333333);
+    --color-ring-primary: light-dark(#1d5fa8, #8ab8ee);
+    --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --font-weight-normal: 400;
+    --font-weight-medium: 500;
+    --font-weight-semibold: 600;
+    --font-text-xs-size: 11px;
+    --font-text-sm-size: 12.5px;
+    --font-text-md-size: 14px;
+    --font-text-lg-size: 16px;
+    --font-heading-sm-size: 17px;
+    --border-radius-sm: 6px;
+    --border-radius-md: 10px;
+    --border-radius-lg: 14px;
+    --border-radius-full: 9999px;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+    color-scheme: light dark;
+  }
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"]  { color-scheme: dark; }
+
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body {
+    font-family: var(--font-sans);
+    font-size: var(--font-text-md-size);
+    line-height: 1.45;
+    color: var(--color-text-primary);
+    -webkit-font-smoothing: antialiased;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+
+  .card {
+    background: var(--color-background-primary);
+    border: 1px solid var(--color-border-primary);
+    border-radius: var(--border-radius-lg);
+    overflow: hidden;
+  }
+  :root[data-host-border="true"] .card { border: none; border-radius: 0; }
+
+  /* ---- Header ------------------------------------------------------- */
+  .hdr {
+    display: flex; gap: 12px; align-items: flex-start;
+    padding: 14px 16px 10px;
+  }
+  .avatar {
+    flex: 0 0 40px; width: 40px; height: 40px; border-radius: var(--border-radius-full);
+    display: grid; place-items: center;
+    color: #fff; font-weight: var(--font-weight-semibold); font-size: 15px;
+    letter-spacing: 0.02em; user-select: none;
+    background: var(--avatar-bg, #6b7280);
+  }
+  .who { flex: 1 1 auto; min-width: 0; }
+  .from-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .from-name {
+    font-weight: var(--font-weight-semibold); font-size: var(--font-text-md-size);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .from-addr {
+    color: var(--color-text-secondary); font-size: var(--font-text-sm-size);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+  }
+  .to-line {
+    color: var(--color-text-secondary); font-size: var(--font-text-sm-size);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    margin-top: 1px;
+  }
+  .to-line button {
+    all: unset; cursor: pointer; color: var(--color-text-tertiary);
+    margin-left: 4px; font-size: var(--font-text-xs-size);
+  }
+  .to-line button:hover { color: var(--color-text-primary); }
+  .to-line button:focus-visible { outline: 2px solid var(--color-ring-primary); border-radius: 3px; }
+  .meta { flex: 0 0 auto; text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+  .date { color: var(--color-text-secondary); font-size: var(--font-text-sm-size); white-space: nowrap; }
+  .badges { display: flex; gap: 6px; align-items: center; height: 14px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .dot.unread { background: #2f80ed; }
+  .dot.flag { box-shadow: 0 0 0 1px rgba(0,0,0,0.08) inset; }
+  .clip { width: 12px; height: 12px; color: var(--color-text-tertiary); }
+
+  /* ---- Subject + details -------------------------------------------- */
+  .subject {
+    padding: 0 16px 8px;
+    font-size: var(--font-heading-sm-size); font-weight: var(--font-weight-semibold);
+    line-height: 1.3; overflow-wrap: anywhere;
+  }
+  .details {
+    margin: 0 16px 10px; padding: 8px 10px;
+    background: var(--color-background-secondary);
+    border-radius: var(--border-radius-md);
+    font-size: var(--font-text-sm-size);
+    display: grid; grid-template-columns: max-content 1fr; gap: 3px 10px;
+  }
+  .details dt { color: var(--color-text-tertiary); margin: 0; }
+  .details dd { margin: 0; overflow-wrap: anywhere; }
+
+  /* ---- Attachments -------------------------------------------------- */
+  .atts { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 10px; }
+  .att {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 9px; max-width: 100%;
+    border: 1px solid var(--color-border-primary); border-radius: var(--border-radius-full);
+    font-size: var(--font-text-xs-size); color: var(--color-text-secondary);
+    background: var(--color-background-secondary);
+  }
+  .att .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; color: var(--color-text-primary); }
+  .att .size { color: var(--color-text-tertiary); }
+
+  /* ---- Body --------------------------------------------------------- */
+  .body-wrap { position: relative; border-top: 1px solid var(--color-border-secondary); }
+  .body { padding: 12px 16px 14px; max-height: 380px; overflow: hidden; }
+  .body.expanded { max-height: none; }
+  .body-wrap.overflows:not(.expanded-wrap)::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 64px;
+    pointer-events: none;
+    background: linear-gradient(to bottom, transparent, var(--color-background-primary));
+  }
+  .text {
+    white-space: pre-wrap; overflow-wrap: anywhere;
+    font-size: var(--font-text-md-size); line-height: 1.5;
+  }
+  .text .q { color: var(--color-text-secondary); border-left: 2px solid var(--color-border-primary); padding-left: 8px; }
+  .text a[href], .html a[href] { color: var(--color-text-info); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+
+  /* HTML mail is authored for a white page: give it one, in both themes. */
+  .paper {
+    color-scheme: light; background: #ffffff; color: #1a1a1a;
+    border-radius: var(--border-radius-md); padding: 12px 14px;
+    overflow-x: auto; font-size: 14px; line-height: 1.45;
+  }
+  :root[data-theme="dark"] .paper { box-shadow: 0 0 0 1px rgba(255,255,255,0.08); }
+  .html { overflow-wrap: anywhere; }
+  .html img { max-width: 100%; height: auto; }
+  .html table { max-width: 100%; }
+  .html blockquote { margin: 6px 0; padding-left: 10px; border-left: 2px solid #d0d0d0; color: #555; }
+  .html pre { white-space: pre-wrap; }
+  .img-ph {
+    display: inline-block; padding: 2px 8px; margin: 2px 0;
+    border: 1px dashed #c9c9c9; border-radius: 4px;
+    color: #777; font-size: 11px; background: #fafafa; vertical-align: middle;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  /* ---- Footer / actions --------------------------------------------- */
+  .ftr {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 10px 16px 12px; border-top: 1px solid var(--color-border-secondary);
+    background: var(--color-background-secondary);
+  }
+  .btn {
+    appearance: none; border: 1px solid var(--color-border-primary);
+    background: var(--color-background-primary); color: var(--color-text-primary);
+    border-radius: var(--border-radius-md); padding: 6px 12px;
+    font: inherit; font-size: var(--font-text-sm-size); font-weight: var(--font-weight-medium);
+    cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+    box-shadow: var(--shadow-sm);
+  }
+  .btn:hover { background: var(--color-background-tertiary); }
+  .btn:focus-visible { outline: 2px solid var(--color-ring-primary); outline-offset: 1px; }
+  .btn.primary { background: #2f6fed; border-color: #2f6fed; color: #fff; }
+  .btn.primary:hover { background: #2861d1; }
+  .btn svg { width: 14px; height: 14px; }
+  .btn.ghost { border-color: transparent; background: transparent; box-shadow: none; color: var(--color-text-secondary); }
+  .btn.ghost:hover { background: var(--color-background-tertiary); color: var(--color-text-primary); }
+  .spacer { flex: 1 1 auto; }
+  .footnote { color: var(--color-text-tertiary); font-size: var(--font-text-xs-size); }
+  .footnote.note { color: var(--color-text-secondary); }
+
+  /* ---- States ------------------------------------------------------- */
+  .state { padding: 16px; color: var(--color-text-secondary); font-size: var(--font-text-sm-size); }
+  .state.error { color: var(--color-text-danger); background: var(--color-background-danger); }
+  .skel { height: 12px; border-radius: 6px; background: var(--color-background-tertiary); margin: 8px 0; animation: pulse 1.4s ease-in-out infinite; }
+  .skel.w40 { width: 40%; } .skel.w70 { width: 70%; } .skel.w90 { width: 90%; }
+  @keyframes pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style>
+</head>
+<body>
+<div class="card" id="card">
+  <div id="loading" class="state" aria-live="polite">
+    <div class="skel w40"></div>
+    <div class="skel w70"></div>
+    <div class="skel w90"></div>
+    <span class="sr">Loading email preview</span>
+  </div>
+  <div id="error" class="state error" hidden></div>
+  <div id="content" hidden>
+    <div class="hdr">
+      <div class="avatar" id="avatar" aria-hidden="true"></div>
+      <div class="who">
+        <div class="from-line">
+          <span class="from-name" id="fromName"></span>
+          <span class="from-addr" id="fromAddr"></span>
+        </div>
+        <div class="to-line" id="toLine"></div>
+      </div>
+      <div class="meta">
+        <span class="date" id="date"></span>
+        <span class="badges" id="badges"></span>
+      </div>
+    </div>
+    <div class="subject" id="subject"></div>
+    <dl class="details" id="details" hidden></dl>
+    <div class="atts" id="atts" hidden></div>
+    <div class="body-wrap" id="bodyWrap">
+      <div class="body" id="body"></div>
+    </div>
+    <div class="ftr">
+      <button class="btn primary" id="openBtn" type="button">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2.5 4.5h11v7.5h-11z"/><path d="M2.5 4.5 8 9l5.5-4.5"/></svg>
+        Open in Mail
+      </button>
+      <button class="btn ghost" id="moreBtn" type="button" hidden>Show more</button>
+      <button class="btn ghost" id="viewBtn" type="button" hidden>Plain text</button>
+      <span class="spacer"></span>
+      <span class="footnote" id="footnote"></span>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ====================================================================
+  // JSON-RPC over postMessage (View side of the MCP Apps protocol)
+  // ====================================================================
+  var PROTOCOL_VERSION = "2026-01-26";
+  var APP_INFO = { name: "Apple Mail Email Preview", version: "1.0.0" };
+  var nextId = 1;
+  var pending = new Map();
+  var hostContext = {};
+  var hostCapabilities = {};
+  var connected = false;
+
+  function post(msg) { window.parent.postMessage(msg, "*"); }
+  function request(method, params) {
+    return new Promise(function (resolve, reject) {
+      var id = nextId++;
+      pending.set(id, { resolve: resolve, reject: reject });
+      post({ jsonrpc: "2.0", id: id, method: method, params: params || {} });
+    });
+  }
+  function notify(method, params) { post({ jsonrpc: "2.0", method: method, params: params || {} }); }
+  function respond(id, result) { post({ jsonrpc: "2.0", id: id, result: result }); }
+  function respondError(id, code, message) { post({ jsonrpc: "2.0", id: id, error: { code: code, message: message } }); }
+
+  window.addEventListener("message", function (ev) {
+    if (ev.source !== window.parent) return;
+    var m = ev.data;
+    if (!m || m.jsonrpc !== "2.0") return;
+    if (m.method === undefined && m.id !== undefined) {           // response to us
+      var p = pending.get(m.id);
+      if (!p) return;
+      pending.delete(m.id);
+      if (m.error) p.reject(m.error); else p.resolve(m.result);
+      return;
+    }
+    if (m.id !== undefined) handleRequest(m); else handleNotification(m);
+  });
+
+  function handleRequest(m) {
+    switch (m.method) {
+      case "ping":
+        respond(m.id, {}); break;
+      case "ui/resource-teardown":
+        respond(m.id, {}); break;
+      default:
+        respondError(m.id, -32601, "Method not found: " + m.method);
+    }
+  }
+
+  function handleNotification(m) {
+    var p = m.params || {};
+    switch (m.method) {
+      case "ui/notifications/tool-input":
+      case "ui/notifications/tool-input-partial":
+        onToolInput(p.arguments || {}); break;
+      case "ui/notifications/tool-result":
+        onToolResult(p); break;
+      case "ui/notifications/tool-cancelled":
+        showError("Preview cancelled" + (p.reason ? ": " + p.reason : ".")); break;
+      case "ui/notifications/host-context-changed":
+        applyHostContext(Object.assign(hostContext, p)); break;
+      default: break;
+    }
+  }
+
+  function connect() {
+    request("ui/initialize", {
+      appInfo: APP_INFO,
+      appCapabilities: { availableDisplayModes: ["inline"] },
+      protocolVersion: PROTOCOL_VERSION
+    }).then(function (result) {
+      result = result || {};
+      hostCapabilities = result.hostCapabilities || {};
+      hostContext = result.hostContext || {};
+      applyHostContext(hostContext);
+      connected = true;
+      notify("ui/notifications/initialized", {});
+      startSizeReporting();
+    }).catch(function (err) {
+      console.error("ui/initialize failed", err);
+      startSizeReporting();
+    });
+  }
+
+  // ====================================================================
+  // Host context: theme, style variables, fonts, dimensions
+  // ====================================================================
+  function applyHostContext(ctx) {
+    var root = document.documentElement;
+    if (ctx.theme === "light" || ctx.theme === "dark") root.setAttribute("data-theme", ctx.theme);
+    if (ctx.styles && ctx.styles.variables) {
+      Object.keys(ctx.styles.variables).forEach(function (k) {
+        var v = ctx.styles.variables[k];
+        if (/^--[a-z0-9-]+$/i.test(k) && typeof v === "string") root.style.setProperty(k, v);
+      });
+    }
+    if (ctx.styles && ctx.styles.css && typeof ctx.styles.css.fonts === "string") {
+      var el = document.getElementById("hostFonts");
+      if (!el) { el = document.createElement("style"); el.id = "hostFonts"; document.head.appendChild(el); }
+      el.textContent = ctx.styles.css.fonts;
+    }
+    var dims = ctx.containerDimensions;
+    if (dims) {
+      root.style.height = ("height" in dims) ? "100vh" : "";
+      root.style.maxHeight = (!("height" in dims) && dims.maxHeight) ? dims.maxHeight + "px" : "";
+      root.style.overflowY = (("height" in dims) || dims.maxHeight) ? "auto" : "";
+      root.style.width = ("width" in dims) ? "100vw" : "";
+      root.style.maxWidth = (!("width" in dims) && dims.maxWidth) ? dims.maxWidth + "px" : "";
+    }
+    if (ctx.safeAreaInsets) {
+      var s = ctx.safeAreaInsets;
+      document.body.style.padding = (s.top|0) + "px " + (s.right|0) + "px " + (s.bottom|0) + "px " + (s.left|0) + "px";
+    }
+  }
+
+  var sizeTimer = null, lastW = -1, lastH = -1;
+  function reportSize() {
+    if (sizeTimer) return;
+    sizeTimer = requestAnimationFrame(function () {
+      sizeTimer = null;
+      var card = document.getElementById("card");
+      var h = Math.ceil(card.getBoundingClientRect().height + bodyPad("Top") + bodyPad("Bottom"));
+      var w = Math.ceil(document.documentElement.getBoundingClientRect().width);
+      // Past the host's ceiling the document scrolls internally; don't ask
+      // for more than it will give.
+      var dims = hostContext.containerDimensions || {};
+      if (!("height" in dims) && dims.maxHeight) h = Math.min(h, dims.maxHeight);
+      if (h === lastH && w === lastW) return;
+      lastH = h; lastW = w;
+      notify("ui/notifications/size-changed", { width: w, height: h });
+    });
+  }
+  function bodyPad(side) { return parseFloat(getComputedStyle(document.body)["padding" + side]) || 0; }
+  function startSizeReporting() {
+    if (window.ResizeObserver) {
+      var ro = new ResizeObserver(reportSize);
+      ro.observe(document.documentElement);
+      ro.observe(document.body);
+      ro.observe(document.getElementById("card"));
+    }
+    reportSize();
+  }
+
+  // ====================================================================
+  // Rendering
+  // ====================================================================
+  var $ = function (id) { return document.getElementById(id); };
+  var msg = null;            // structuredContent from the tool result
+  var showingHtml = false;
+  var bodyExpanded = false;
+
+  function onToolInput(args) {
+    if (args && args.message_id !== undefined) {
+      $("loading").querySelector(".sr").textContent = "Loading email " + args.message_id;
+    }
+  }
+
+  function onToolResult(result) {
+    if (result.isError) {
+      showError(textOf(result.content) || "The email could not be loaded.");
+      return;
+    }
+    var sc = result.structuredContent;
+    if (!sc || typeof sc !== "object") {
+      // Fallback: the server might have put JSON in the text content.
+      try { sc = JSON.parse(textOf(result.content)); } catch (e) { sc = null; }
+    }
+    if (!sc) { showError("No email data in the tool result."); return; }
+    msg = sc;
+    render();
+  }
+
+  function textOf(content) {
+    if (!Array.isArray(content)) return "";
+    return content.filter(function (c) { return c && c.type === "text"; })
+                  .map(function (c) { return c.text; }).join("\n");
+  }
+
+  function showError(text) {
+    $("loading").hidden = true;
+    $("content").hidden = true;
+    var e = $("error"); e.textContent = text; e.hidden = false;
+    reportSize();
+  }
+
+  function render() {
+    var m = msg;
+    var from = parseAddress(m.sender);
+    var av = $("avatar");
+    av.textContent = initials(from.name || from.address);
+    av.style.setProperty("--avatar-bg", avatarColor(from.address || from.name));
+    $("fromName").textContent = from.name || from.address || "(unknown sender)";
+    $("fromAddr").textContent = (from.name && from.address) ? from.address : "";
+
+    renderRecipients(m);
+    $("date").textContent = formatDate(m.date_sent || m.date_received, false);
+    $("date").title = formatDate(m.date_sent || m.date_received, true);
+    renderBadges(m);
+    $("subject").textContent = m.subject || "(no subject)";
+    renderDetails(m);
+    renderAttachments(m);
+
+    showingHtml = !!(m.body_html && m.body_html.trim());
+    $("viewBtn").hidden = !(m.body_html && m.body_text && m.body_text.trim());
+    renderBody();
+
+    var canOpen = !!(m.open_link || m.mail_link);
+    $("openBtn").hidden = !canOpen;
+    $("footnote").textContent = [m.account, m.mailbox].filter(Boolean).join(" › ");
+
+    $("loading").hidden = true;
+    $("error").hidden = true;
+    $("content").hidden = false;
+    // Overflow can only be measured once the content is laid out.
+    updateOverflow();
+  }
+
+  function renderRecipients(m) {
+    var to = (m.to || []).map(function (a) { return parseAddress(a).name || a; });
+    var cc = (m.cc || []).map(function (a) { return parseAddress(a).name || a; });
+    var line = $("toLine");
+    line.textContent = "";
+    var parts = [];
+    if (to.length) parts.push("To: " + to.join(", "));
+    if (cc.length) parts.push("Cc: " + cc.join(", "));
+    line.appendChild(document.createTextNode(parts.join("  ·  ") || "To: (undisclosed recipients)"));
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Details ▾";
+    btn.setAttribute("aria-expanded", "false");
+    btn.addEventListener("click", function () {
+      var d = $("details");
+      d.hidden = !d.hidden;
+      btn.textContent = d.hidden ? "Details ▾" : "Details ▴";
+      btn.setAttribute("aria-expanded", String(!d.hidden));
+      reportSize();
+    });
+    line.appendChild(btn);
+  }
+
+  function renderBadges(m) {
+    var b = $("badges"); b.textContent = "";
+    if (m.is_read === false) {
+      var u = document.createElement("span"); u.className = "dot unread"; u.title = "Unread"; b.appendChild(u);
+    }
+    if (m.is_flagged) {
+      var f = document.createElement("span"); f.className = "dot flag";
+      f.style.background = flagColor(m.flag_color); f.title = "Flagged" + (m.flag_color ? " (" + m.flag_color + ")" : "");
+      b.appendChild(f);
+    }
+    if (m.has_attachments || (m.attachments && m.attachments.length)) {
+      b.insertAdjacentHTML("beforeend",
+        '<svg class="clip" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-label="Has attachments"><path d="M10.5 5.5 6 10a1.6 1.6 0 0 0 2.3 2.3l5-5A3.2 3.2 0 0 0 8.7 2.7l-5.4 5.4a4.8 4.8 0 0 0 6.8 6.8l3.6-3.6"/></svg>');
+    }
+  }
+
+  function renderDetails(m) {
+    var d = $("details"); d.textContent = "";
+    function row(k, v) {
+      if (!v) return;
+      var dt = document.createElement("dt"); dt.textContent = k;
+      var dd = document.createElement("dd"); dd.textContent = v;
+      d.appendChild(dt); d.appendChild(dd);
+    }
+    row("From", m.sender);
+    row("To", (m.to || []).join(", "));
+    row("Cc", (m.cc || []).join(", "));
+    row("Date", formatDate(m.date_sent, true));
+    if (m.date_received && m.date_received !== m.date_sent) row("Received", formatDate(m.date_received, true));
+    row("Mailbox", [m.account, m.mailbox].filter(Boolean).join(" › "));
+    if (m.size) row("Size", formatBytes(m.size));
+    row("Message-ID", m.message_id);
+  }
+
+  function renderAttachments(m) {
+    var wrap = $("atts"); wrap.textContent = "";
+    var list = m.attachments || [];
+    wrap.hidden = list.length === 0;
+    list.forEach(function (a) {
+      var chip = document.createElement("span"); chip.className = "att";
+      chip.title = (a.filename || "attachment") + (a.content_type ? " — " + a.content_type : "");
+      chip.insertAdjacentHTML("beforeend",
+        '<svg class="clip" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M10.5 5.5 6 10a1.6 1.6 0 0 0 2.3 2.3l5-5A3.2 3.2 0 0 0 8.7 2.7l-5.4 5.4a4.8 4.8 0 0 0 6.8 6.8l3.6-3.6"/></svg>');
+      var n = document.createElement("span"); n.className = "name"; n.textContent = a.filename || "attachment";
+      chip.appendChild(n);
+      if (a.size) { var s = document.createElement("span"); s.className = "size"; s.textContent = formatBytes(a.size); chip.appendChild(s); }
+      wrap.appendChild(chip);
+    });
+  }
+
+  function renderBody() {
+    var body = $("body"); body.textContent = "";
+    var m = msg;
+    if (showingHtml) {
+      var paper = document.createElement("div"); paper.className = "paper";
+      var html = document.createElement("div"); html.className = "html";
+      html.appendChild(sanitizeHtml(m.body_html));
+      paper.appendChild(html);
+      body.appendChild(paper);
+      $("viewBtn").textContent = "Plain text";
+    } else {
+      var t = document.createElement("div"); t.className = "text";
+      t.appendChild(renderPlainText(m.body_text || ""));
+      body.appendChild(t);
+      $("viewBtn").textContent = "Rich text";
+      if (!(m.body_text || "").trim()) {
+        t.textContent = m.body_html ? "" : "(This message has no text content.)";
+        t.style.color = "var(--color-text-tertiary)";
+      }
+    }
+    // Any click on a link inside the body goes through the host.
+    body.querySelectorAll("a[href]").forEach(function (a) {
+      a.addEventListener("click", function (ev) { ev.preventDefault(); openLink(a.getAttribute("href")); });
+    });
+    updateOverflow();
+  }
+
+  function updateOverflow() {
+    var body = $("body"), wrap = $("bodyWrap");
+    body.classList.toggle("expanded", bodyExpanded);
+    wrap.classList.toggle("expanded-wrap", bodyExpanded);
+    // Measure whether the collapsed body clips content.
+    var overflows = bodyExpanded ? true : body.scrollHeight > body.clientHeight + 4;
+    wrap.classList.toggle("overflows", overflows && !bodyExpanded);
+    var btn = $("moreBtn");
+    btn.hidden = !(overflows || bodyExpanded);
+    btn.textContent = bodyExpanded ? "Show less" : "Show more";
+    reportSize();
+  }
+
+  // ---- Plain text: linkify + quote styling ----------------------------
+  var URL_RE = /\bhttps?:\/\/[^\s<>"'\)\]]+[^\s<>"'\)\].,;:!?]/g;
+  function renderPlainText(text) {
+    var frag = document.createDocumentFragment();
+    text.replace(/\r\n?/g, "\n").split("\n").forEach(function (line, i, all) {
+      var target = frag;
+      if (/^\s*>/.test(line)) {
+        var q = document.createElement("span"); q.className = "q"; frag.appendChild(q); target = q;
+        line = line.replace(/^\s*(>\s?)+/, "");
+      }
+      var last = 0, mt;
+      URL_RE.lastIndex = 0;
+      while ((mt = URL_RE.exec(line)) !== null) {
+        if (mt.index > last) target.appendChild(document.createTextNode(line.slice(last, mt.index)));
+        var a = document.createElement("a"); a.href = mt[0]; a.textContent = mt[0]; a.rel = "noopener noreferrer";
+        target.appendChild(a);
+        last = mt.index + mt[0].length;
+      }
+      if (last < line.length) target.appendChild(document.createTextNode(line.slice(last)));
+      if (i < all.length - 1) frag.appendChild(document.createTextNode("\n"));
+    });
+    return frag;
+  }
+
+  // ---- HTML sanitizer ------------------------------------------------
+  // Allowlist-based. Everything not listed is unwrapped (children kept) or,
+  // for the DROP set, removed with its subtree. Attributes are allowlisted
+  // per element; URLs are scheme-checked; inline styles lose url()/expression.
+  var ALLOW = new Set(("a abbr address article aside b bdi bdo big blockquote br caption center cite code col colgroup " +
+    "dd del details dfn div dl dt em figcaption figure font footer h1 h2 h3 h4 h5 h6 header hr i img ins kbd li " +
+    "main mark nav ol p pre q s samp section small span strike strong sub summary sup table tbody td tfoot th thead " +
+    "time tr tt u ul var wbr").split(" "));
+  var DROP = new Set(("script style head title meta link base iframe frame frameset object embed applet noscript " +
+    "svg math template form input button select textarea option optgroup datalist output progress meter " +
+    "video audio source track canvas map area dialog slot portal").split(" "));
+  var GLOBAL_ATTRS = new Set(["title", "dir", "lang", "align", "valign", "width", "height", "bgcolor", "color",
+    "border", "cellpadding", "cellspacing", "colspan", "rowspan", "nowrap", "face", "size", "style", "alt"]);
+
+  function sanitizeHtml(src) {
+    var doc;
+    try { doc = new DOMParser().parseFromString(String(src), "text/html"); }
+    catch (e) { var t = document.createDocumentFragment(); t.textContent = String(src); return t; }
+    var out = document.createDocumentFragment();
+    var body = doc.body || doc.documentElement;
+    // Carry the body's own bgcolor/style onto a wrapper, emails often set it.
+    var wrapper = document.createElement("div");
+    var bodyStyle = cleanStyle(body.getAttribute("style"));
+    if (bodyStyle) wrapper.setAttribute("style", bodyStyle);
+    if (body.getAttribute("bgcolor")) wrapper.style.backgroundColor = body.getAttribute("bgcolor");
+    Array.prototype.slice.call(body.childNodes).forEach(function (n) { appendClean(n, wrapper); });
+    out.appendChild(wrapper);
+    return out;
+  }
+
+  function appendClean(node, parent) {
+    if (node.nodeType === 3) { parent.appendChild(document.createTextNode(node.nodeValue)); return; }
+    if (node.nodeType !== 1) return;                   // comments, PIs, etc.
+    var tag = node.localName;
+    if (DROP.has(tag)) return;
+    if (!ALLOW.has(tag)) {                             // unknown: unwrap
+      Array.prototype.slice.call(node.childNodes).forEach(function (c) { appendClean(c, parent); });
+      return;
+    }
+    if (tag === "img") { var ph = cleanImage(node); if (ph) parent.appendChild(ph); return; }
+    var el = document.createElement(tag);
+    Array.prototype.slice.call(node.attributes).forEach(function (attr) {
+      var name = attr.name.toLowerCase(), value = attr.value;
+      if (name.indexOf("on") === 0) return;
+      if (name === "style") { var cs = cleanStyle(value); if (cs) el.setAttribute("style", cs); return; }
+      if (tag === "a" && name === "href") {
+        var u = safeUrl(value, ["http:", "https:", "mailto:", "tel:"]);
+        if (u) { el.setAttribute("href", u); el.setAttribute("rel", "noopener noreferrer"); }
+        return;
+      }
+      if (GLOBAL_ATTRS.has(name)) el.setAttribute(name, value);
+    });
+    Array.prototype.slice.call(node.childNodes).forEach(function (c) { appendClean(c, el); });
+    parent.appendChild(el);
+  }
+
+  function cleanImage(node) {
+    var src = node.getAttribute("src") || "";
+    var alt = node.getAttribute("alt") || "";
+    var w = parseInt(node.getAttribute("width"), 10), h = parseInt(node.getAttribute("height"), 10);
+    if (/^data:image\/(png|jpe?g|gif|webp|bmp);base64,/i.test(src)) {
+      var img = document.createElement("img");
+      img.setAttribute("src", src);
+      if (alt) img.setAttribute("alt", alt);
+      if (w) img.setAttribute("width", w);
+      if (h) img.setAttribute("height", h);
+      var st = cleanStyle(node.getAttribute("style")); if (st) img.setAttribute("style", st);
+      return img;
+    }
+    // Remote / cid: images can't load under the sandbox CSP. Only images
+    // the sender described (alt text) are worth a placeholder; tracking
+    // pixels, spacers and undescribed decoration vanish without a trace.
+    if (!alt.trim()) return null;
+    var ph = document.createElement("span"); ph.className = "img-ph";
+    ph.textContent = "🖼 " + alt.trim();
+    ph.title = /^cid:/i.test(src) ? "Inline attachment (not shown in preview)" : "Remote images are not loaded in previews";
+    return ph;
+  }
+
+  function safeUrl(value, schemes) {
+    var v = String(value || "").trim();
+    if (!v) return null;
+    var cleaned = v.replace(/[\u0000-\u0020\u007f]+/g, "");
+    if (/^(javascript|data|vbscript|file|blob):/i.test(cleaned)) return null;
+    try {
+      var u = new URL(v, "https://invalid.local/");
+      if (schemes.indexOf(u.protocol) === -1) return null;
+      if (u.hostname === "invalid.local") return null;   // relative URL: meaningless here
+      return u.href;
+    } catch (e) { return null; }
+  }
+
+  function cleanStyle(style) {
+    if (!style) return "";
+    var s = String(style);
+    if (/expression\s*\(|behavior\s*:|-moz-binding|@import|javascript:/i.test(s)) return "";
+    s = s.replace(/url\s*\([^)]*\)/gi, "none");
+    s = s.replace(/position\s*:\s*(fixed|sticky)/gi, "position: static");
+    return s;
+  }
+
+  // ---- Actions -------------------------------------------------------
+  function openLink(url) {
+    if (!url) return;
+    if (hostCapabilities.openLinks || connected) {
+      request("ui/open-link", { url: url }).catch(function (err) { console.warn("ui/open-link rejected", err); });
+    } else {
+      try { window.open(url, "_blank", "noopener"); } catch (e) { /* sandboxed */ }
+    }
+  }
+
+  $("openBtn").addEventListener("click", function () {
+    if (!msg) return;
+    // open_link is an http://127.0.0.1 URL served by the connector: the
+    // browser hits it and it hands the message:// URL to Mail.app. Chat
+    // hosts refuse to open message:// directly, so it comes second.
+    openLink(msg.open_link || msg.mail_link);
+  });
+  $("moreBtn").addEventListener("click", function () { bodyExpanded = !bodyExpanded; updateOverflow(); });
+  $("viewBtn").addEventListener("click", function () { showingHtml = !showingHtml; renderBody(); });
+
+  // ---- Formatting helpers -------------------------------------------
+  function parseAddress(s) {
+    s = String(s || "").trim();
+    var m = s.match(/^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/);
+    if (m) return { name: m[1].trim(), address: m[2].trim() };
+    if (/^[^\s@]+@[^\s@]+$/.test(s)) return { name: "", address: s };
+    return { name: s, address: "" };
+  }
+  function initials(s) {
+    s = String(s || "").replace(/["']/g, "").trim();
+    if (!s) return "?";
+    if (s.indexOf("@") !== -1 && s.indexOf(" ") === -1) return s[0].toUpperCase();
+    var parts = s.split(/\s+/).filter(Boolean);
+    return ((parts[0] || "")[0] + ((parts.length > 1 ? parts[parts.length - 1] : "")[0] || "")).toUpperCase();
+  }
+  var PALETTE = ["#d95f5f", "#dd8a3b", "#c9a227", "#5aa35a", "#3f9f8f", "#4a8fdc", "#6a6fdc", "#a05fd9", "#d15fa9", "#7f8a99"];
+  function avatarColor(key) {
+    var h = 0; key = String(key || "").toLowerCase();
+    for (var i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+    return PALETTE[h % PALETTE.length];
+  }
+  function flagColor(name) {
+    return ({ red: "#ff453a", orange: "#ff9f0a", yellow: "#ffd60a", green: "#30d158", blue: "#0a84ff", purple: "#bf5af2", gray: "#8e8e93" })[name] || "#ff9f0a";
+  }
+  function formatDate(iso, full) {
+    if (!iso) return "";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    var loc = hostContext.locale || undefined;
+    var tz = hostContext.timeZone || undefined;
+    try {
+      if (full) return new Intl.DateTimeFormat(loc, { dateStyle: "full", timeStyle: "short", timeZone: tz }).format(d);
+      var now = new Date();
+      var sameDay = d.toDateString() === now.toDateString();
+      var sameYear = d.getFullYear() === now.getFullYear();
+      if (sameDay) return new Intl.DateTimeFormat(loc, { timeStyle: "short", timeZone: tz }).format(d);
+      if (sameYear) return new Intl.DateTimeFormat(loc, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: tz }).format(d);
+      return new Intl.DateTimeFormat(loc, { dateStyle: "medium", timeZone: tz }).format(d);
+    } catch (e) { return d.toLocaleString(); }
+  }
+  function formatBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB";
+    return (n / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>
