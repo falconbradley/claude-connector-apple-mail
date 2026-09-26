@@ -41,6 +41,7 @@ from .emlx import (
     read_emlx,
     read_emlx_headers,
     read_emlx_message_bytes,
+    safe_attachment_filename,
 )
 
 logger = logging.getLogger("apple_mail_mcp.envelope")
@@ -910,7 +911,9 @@ class EnvelopeIndexBridge:
             result.append(
                 {
                     "index": index,
-                    "name": filename or f"attachment_{index}",
+                    "name": safe_attachment_filename(
+                        filename, f"attachment_{index}"
+                    ),
                     "mime_type": part.get_content_type(),
                     "file_size": size,
                 }
@@ -938,12 +941,18 @@ class EnvelopeIndexBridge:
             if index != attachment_index:
                 index += 1
                 continue
-            name = filename or f"attachment_{attachment_index}"
+            name = safe_attachment_filename(
+                filename, f"attachment_{attachment_index}"
+            )
             mime_type = part.get_content_type()
             payload = part.get_payload(decode=True)
             if payload:
                 return name, mime_type, payload
-            external = self._find_external_attachment(message_id, name)
+            # Match on the raw header name: the lookup only compares it
+            # against basenames already on disk, it never builds a path.
+            external = self._find_external_attachment(
+                message_id, filename or name
+            )
             if external is not None:
                 try:
                     return name, mime_type, external.read_bytes()

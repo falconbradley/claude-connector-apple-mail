@@ -25,6 +25,8 @@ from email.utils import parseaddr as _parseaddr
 from pathlib import Path
 from typing import Any, Optional
 
+from .emlx import safe_attachment_filename
+
 logger = logging.getLogger("apple_mail_mcp.applescript")
 
 # ---------------------------------------------------------------------------
@@ -1172,7 +1174,13 @@ class MailBridge:
         }})();
         """
         result = self._run_jxa(script, timeout=30)
-        return result if isinstance(result, list) else []
+        if not isinstance(result, list):
+            return []
+        for att in result:
+            att["name"] = safe_attachment_filename(
+                att.get("name"), f"attachment_{att.get('index', 0)}"
+            )
+        return result
 
     def get_attachment(
         self, message_id: int, attachment_index: int
@@ -1191,7 +1199,12 @@ class MailBridge:
         safe_mbox = _js_escape(mbox_name)
 
         with tempfile.TemporaryDirectory(prefix="apple_mail_att_") as tmpdir:
-            safe_tmpdir = _js_escape(tmpdir)
+            tmp_root = Path(tmpdir).resolve()
+            # The on-disk name is fixed. att.name() is sender-controlled
+            # (Content-Disposition filename) and may contain "../" segments,
+            # so it must never be part of the save path.
+            save_path = tmp_root / "attachment"
+            safe_save_path = _js_escape(str(save_path))
 
             # First get the attachment metadata and save it
             script = f"""
@@ -1215,13 +1228,11 @@ class MailBridge:
                 var fileName = att.name() || "attachment_{attachment_index}";
                 var mimeType = att.mimeType() || "application/octet-stream";
 
-                var savePath = "{safe_tmpdir}/" + fileName;
-                mail.save(att, {{in: Path(savePath)}});
+                mail.save(att, {{in: Path("{safe_save_path}")}});
 
                 return JSON.stringify({{
                     "filename": fileName,
-                    "mime_type": mimeType,
-                    "saved_path": savePath
+                    "mime_type": mimeType
                 }});
             }})();
             """
@@ -1229,23 +1240,26 @@ class MailBridge:
             if result is None:
                 return None
 
-            filename: str = result.get("filename", f"attachment_{attachment_index}")
+            filename = safe_attachment_filename(
+                result.get("filename"), f"attachment_{attachment_index}"
+            )
             mime_type: str = result.get("mime_type", "application/octet-stream")
-            saved_path: str = result.get("saved_path", "")
 
-            if not saved_path:
-                logger.warning("No saved_path returned for attachment.")
-                return None
-
-            path = Path(saved_path)
+            path = save_path
             if not path.exists():
                 # Try to find the file in the temp dir (name might differ)
-                files = list(Path(tmpdir).iterdir())
+                files = [p for p in tmp_root.iterdir() if p.is_file()]
                 if files:
                     path = files[0]
                 else:
-                    logger.warning("Attachment file not found at %s", saved_path)
+                    logger.warning("Attachment file not found at %s", save_path)
                     return None
+
+            # Only ever read from inside our own temp dir (guards against a
+            # symlink or an unexpected rename pointing elsewhere).
+            if not path.resolve().is_relative_to(tmp_root):
+                logger.warning("Refusing to read attachment outside %s", tmp_root)
+                return None
 
             try:
                 raw_bytes = path.read_bytes()
