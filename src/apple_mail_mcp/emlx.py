@@ -65,6 +65,27 @@ def read_emlx_headers(path: Path) -> email_lib.message.Message:
 
 
 # ---------------------------------------------------------------------------
+# Attachment filenames
+# ---------------------------------------------------------------------------
+# Attachment names come from the sender-controlled Content-Disposition /
+# Content-Type headers. They must never be used to build a filesystem path,
+# and what we hand back to callers is reduced to a plain basename so a
+# downstream consumer that saves it can't be steered outside its directory.
+
+_UNSAFE_FILENAME_CHARS_RE = re.compile(r"[\x00-\x1f\x7f/\\:]")
+
+
+def safe_attachment_filename(name: Optional[str], fallback: str) -> str:
+    """Reduce a sender-supplied attachment name to a safe basename."""
+    if not name:
+        return fallback
+    # Keep only the last path component under either separator convention.
+    base = re.split(r"[/\\]", name)[-1]
+    base = _UNSAFE_FILENAME_CHARS_RE.sub("_", base).strip().lstrip(".")
+    return base or fallback
+
+
+# ---------------------------------------------------------------------------
 # HTML -> text (fallback when a message has no text/plain part)
 # ---------------------------------------------------------------------------
 
