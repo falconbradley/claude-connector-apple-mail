@@ -2,7 +2,7 @@ name: Release
 
 # Shared verbatim by every claude-connector-apple-* repo. Push a vX.Y.Z tag
 # whose version matches the three version files and has a CHANGELOG.md
-# section; this tests, builds, and publishes both .mcpb names.
+# section; this tests, builds, and publishes dist/<name>-<version>.mcpb.
 
 on:
   push:
@@ -43,7 +43,7 @@ jobs:
           VERSION="${TAG#v}"
           awk -v v="$VERSION" '
             $0 ~ "^## \\[" v "\\]" { found = 1; next }
-            found && /^## / { exit }
+            found && /^## \[/ { exit }
             found { print }
           ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
           if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
@@ -51,14 +51,12 @@ jobs:
             exit 1
           fi
 
-      # Never ship a bundle whose server cannot start.
-      - name: Test before packing
+      # build.sh runs ./test.sh and the tool check first, so a bundle whose
+      # server cannot start never ships.
+      - name: Test, check, and build
         run: |
           uv sync --all-extras --dev
-          ./test.sh
-
-      - name: Build extension
-        run: ./build.sh
+          ./build.sh
 
       - name: Publish release
         env:
@@ -70,8 +68,6 @@ jobs:
           gh release create "$TAG" \
             --title "$TAG" \
             --notes-file "$RUNNER_TEMP/notes.md" \
-            "dist/${NAME}.mcpb" \
             "dist/${NAME}-${VERSION}.mcpb" \
           || gh release upload "$TAG" --clobber \
-            "dist/${NAME}.mcpb" \
             "dist/${NAME}-${VERSION}.mcpb"

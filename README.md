@@ -128,7 +128,7 @@ cd claude-connector-apple-mail
 ./build.sh
 ```
 
-Then double-click `dist/apple-mail.mcpb` (or drag it into Claude Desktop).
+Then double-click `dist/apple-mail-<version>.mcpb` (or drag it into Claude Desktop).
 
 The extension appears in **Settings > Extensions** with the Apple Mail icon.
 
@@ -195,7 +195,7 @@ npm install -g @anthropic-ai/mcpb
 
 # Or manually:
 mcpb validate manifest.json
-mcpb pack . dist/apple-mail.mcpb
+mcpb pack . dist/apple-mail-<version>.mcpb
 ```
 
 ### Project layout
@@ -209,7 +209,7 @@ apple-mail-mcp/
 │   ├── icon-256.png
 │   └── icon-512.png
 ├── pyproject.toml             # Python package + dependencies
-├── build.sh                   # Validate + pack build script
+├── build.sh                   # Test, check, and pack build script
 └── src/
     └── apple_mail_mcp/
         ├── __init__.py
@@ -300,7 +300,7 @@ Every connector in the family releases the same way:
 2. Add a section for the version to [CHANGELOG.md](CHANGELOG.md).
 3. Commit, tag `vX.Y.Z`, and push the tag: `git push origin main vX.Y.Z`.
 
-The [release workflow](.github/workflows/release.yml) then runs the tests, checks the tag matches all three version files, builds with `./build.sh`, and publishes `apple-mail.mcpb` and `apple-mail-X.Y.Z.mcpb` to a GitHub release whose notes are that version's CHANGELOG section.
+The [release workflow](.github/workflows/release.yml) then checks the tag matches all three version files, runs `./build.sh` (tests, manifest and tool checks, pack), and publishes `apple-mail-X.Y.Z.mcpb` to a GitHub release whose notes are that version's CHANGELOG section.
 
 ## License
 
