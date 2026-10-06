@@ -87,8 +87,9 @@ def main() -> int:
         print(f"  {_FAIL}  {exc}")
         print(
             "\n  To fix: System Settings -> Privacy & Security -> "
-            "Full Disk Access -> enable your terminal app (and Claude "
-            "Desktop for the extension itself), then rerun."
+            "Full Disk Access -> enable your terminal app, then rerun. "
+            "(The installed extension needs its own grant, on the uv that "
+            "Claude Desktop launches it with — see the README.)"
         )
         return 1
 

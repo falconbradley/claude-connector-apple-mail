@@ -9,6 +9,7 @@ build/
 # Dev files
 .git/
 .github/
+test.sh
 .venv/
 .env
 .env.*

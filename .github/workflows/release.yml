@@ -1,0 +1,77 @@
+name: Release
+
+# Shared verbatim by every claude-connector-apple-* repo. Push a vX.Y.Z tag
+# whose version matches the three version files and has a CHANGELOG.md
+# section; this tests, builds, and publishes both .mcpb names.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v1.2.3)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install mcpb CLI
+        run: npm install -g @anthropic-ai/mcpb
+
+      - name: Verify tag matches every version file
+        run: python3 .github/check_versions.py "${{ github.event.inputs.tag || github.ref_name }}"
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            echo "::error::CHANGELOG.md has no section for [$VERSION]"
+            exit 1
+          fi
+
+      # Never ship a bundle whose server cannot start.
+      - name: Test before packing
+        run: |
+          uv sync --all-extras --dev
+          ./test.sh
+
+      - name: Build extension
+        run: ./build.sh
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          NAME=$(python3 -c "import json;print(json.load(open('manifest.json'))['name'])")
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            "dist/${NAME}.mcpb" \
+            "dist/${NAME}-${VERSION}.mcpb" \
+          || gh release upload "$TAG" --clobber \
+            "dist/${NAME}.mcpb" \
+            "dist/${NAME}-${VERSION}.mcpb"

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .emlx import safe_attachment_filename
+from .launcher import full_disk_access_steps
 
 logger = logging.getLogger("apple_mail_mcp.applescript")
 
@@ -48,11 +49,12 @@ _FALLBACK_BUDGET_S = _MCP_CLIENT_TIMEOUT_S - 5.0
 # rather than start something that will be killed halfway.
 _R2_MIN_S = 8.0
 
-_FDA_HINT = (
-    "This is the slow AppleScript fallback. Grant Full Disk Access to the uv "
-    "launcher to enable the fast local-store path, which serves the same "
-    "search in milliseconds — see the Permissions section of the README."
-)
+def _fda_hint() -> str:
+    return (
+        "This is the slow AppleScript fallback. Grant Full Disk Access to "
+        "enable the fast local-store path, which serves the same search in "
+        "milliseconds.\n\n" + full_disk_access_steps()
+    )
 
 
 class _Deadline:
@@ -244,7 +246,7 @@ class MailBridge:
             if remaining <= 0:
                 raise RuntimeError(
                     "Search exceeded its time budget before completing. "
-                    f"{_FDA_HINT}"
+                    f"{_fda_hint()}"
                 )
             timeout = max(1, min(timeout, int(remaining)))
 
@@ -278,7 +280,7 @@ class MailBridge:
                 raise RuntimeError(
                     f"This search is too slow to complete in {timeout}s against "
                     "a mailbox this size. Narrow it (add a mailbox, a date "
-                    f"range, or a sender) or speed it up: {_FDA_HINT}"
+                    f"range, or a sender) or speed it up: {_fda_hint()}"
                 )
             raise RuntimeError(
                 f"Mail.app is not responding (timed out after {timeout}s). "
@@ -474,7 +476,7 @@ class MailBridge:
         if has_attachments is not None:
             raise RuntimeError(
                 "Filtering by attachment presence is not supported on the "
-                f"AppleScript fallback. {_FDA_HINT}"
+                f"AppleScript fallback. {_fda_hint()}"
             )
 
         # One budget for both rounds, so a slow Round 1 cannot leave Round 2

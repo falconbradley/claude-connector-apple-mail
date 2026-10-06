@@ -1,0 +1,80 @@
+name: CI
+
+# Shared verbatim by every claude-connector-apple-* repo; per-repo names
+# come from manifest.json and per-repo tests from ./test.sh.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # macOS: the server imports a macOS-only stack. Live tests skip
+    # themselves — CI runners have no TCC grants.
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
+
+      # Catches SDK drift (e.g. mcp 2.0 removing FastMCP) that static tests
+      # pass happily against, and keeps manifest.json's tool list honest.
+      - name: Import the server and check its tools against the manifest
+        run: |
+          uv run python - <<'PY'
+          import asyncio, importlib, json, sys
+          manifest = json.load(open("manifest.json"))
+          pkg = manifest["name"].replace("-", "_") + "_mcp"
+          server = importlib.import_module(f"{pkg}.server")
+          code = {t.name for t in asyncio.run(server.mcp.list_tools())}
+          listed = {t["name"] for t in manifest["tools"]}
+          if code != listed:
+              print("::error::manifest/server tool mismatch")
+              print(f"  only in manifest.json: {sorted(listed - code)}")
+              print(f"  only in the server:    {sorted(code - listed)}")
+              sys.exit(1)
+          print(f"OK: {server.mcp.name} serves {len(code)} tools, matching manifest.json")
+          PY
+
+      - name: Run tests
+        run: ./test.sh
+
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install mcpb CLI
+        run: npm install -g @anthropic-ai/mcpb
+
+      - name: Validate manifest
+        run: mcpb validate manifest.json
+
+      - name: Check version consistency
+        run: python3 .github/check_versions.py

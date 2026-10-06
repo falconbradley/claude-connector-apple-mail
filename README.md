@@ -151,8 +151,18 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 Two macOS permissions matter:
 
-1. **Full Disk Access** (for the fast read path): System Settings > Privacy & Security > Full Disk Access > enable **uv**. Claude Desktop launches extension servers through a helper that makes the spawned process itself responsible for permissions, so macOS attributes FDA to the `uv` launcher binary — enabling Claude Desktop alone is *not* sufficient. If `uv` isn't in the list, add it with **+** (press Cmd+Shift+G): `~/.local/bin/uv` and/or `~/Library/Application Support/Claude/uv-runtime/<version>/uv`. Then disable/re-enable the extension. Without FDA, reads still work via the slow AppleScript fallback. (Enable your terminal app too if you want to run the selftest.)
+1. **Full Disk Access** (for the fast read path): System Settings > Privacy & Security > Full Disk Access > enable **uv**. Claude Desktop launches extension servers through a helper that makes the spawned process itself responsible for permissions, so macOS attributes FDA to the `uv` launcher binary — enabling Claude Desktop alone is *not* sufficient. If `uv` isn't in the list, add it with **+** (press ⌘⇧G to paste a path): the installed extension uses `~/Library/Application Support/Claude/uv-runtime/<version>/uv` — the fallback's error message prints the exact path — while a manual `claude_desktop_config.json` setup uses whichever `uv` is on your `PATH` (e.g. `~/.local/bin/uv`). Then quit Claude (⌘Q) and reopen it; macOS reads this permission only at launch. Without FDA, reads still work via the slow AppleScript fallback. (Enable your terminal app too if you want to run the selftest.)
 2. **Automation** (for writes and the fallback): Mail.app must be running; macOS prompts automatically on first use — click **OK**. If the prompt doesn't appear, check System Settings > Privacy & Security > Automation.
+
+### Using several Apple connectors
+
+This connector is one of a family of Claude Desktop extensions for Apple apps — **Mail**, [Messages](https://github.com/falconbradley/claude-connector-apple-messages), [Contacts](https://github.com/falconbradley/claude-connector-apple-contacts), [Calendar](https://github.com/falconbradley/claude-connector-apple-calendar), [Reminders](https://github.com/falconbradley/claude-connector-apple-reminders), [Notes](https://github.com/falconbradley/claude-connector-apple-notes) — and they share the same setup quirks:
+
+- **Install them one at a time.** Opening several `.mcpb` files at once can leave Claude Desktop showing only the last install dialog, so the others silently never install. Approve each dialog before opening the next, then check **Settings → Extensions**.
+- **Permissions belong to `uv`, not Claude.** Claude Desktop launches every extension through the same bundled `uv` and macOS attributes their privacy grants to it. Full Disk Access granted once to `~/Library/Application Support/Claude/uv-runtime/<version>/uv` covers Mail, Notes, Messages, and Reminders together; the Contacts, Calendars, and Reminders panes list the connectors as **uv**. Permission errors print the exact path in use, ready to paste.
+- **Re-grant after Claude Desktop updates `uv`.** The `<version>` folder changes and macOS treats the new binary as a new app. Symptoms: Mail and Notes searches report `"engine": "applescript"` and get slow, Messages reads and Reminders tags fail with a Full Disk Access error.
+- **Restart after granting.** Quit Claude (⌘Q) and reopen it — macOS reads Full Disk Access only at launch.
+- **Verify.** Ask Claude for each connector's stats (`get_stats`). For Mail and Notes, a search result's `engine` should be `"sqlite"`.
 
 ---
 
@@ -281,6 +291,16 @@ Large mailboxes (50k+ messages) take longer. Use date filters (`since`) to narro
 Make sure you're running a recent version of Claude Desktop that supports MCPB extensions. Restart Claude Desktop after installing.
 
 ---
+
+## Releasing
+
+Every connector in the family releases the same way:
+
+1. Bump the version in `pyproject.toml`, `manifest.json`, and `src/apple_mail_mcp/__init__.py`, then run `uv lock` so `uv.lock` matches. CI fails if the three disagree.
+2. Add a section for the version to [CHANGELOG.md](CHANGELOG.md).
+3. Commit, tag `vX.Y.Z`, and push the tag: `git push origin main vX.Y.Z`.
+
+The [release workflow](.github/workflows/release.yml) then runs the tests, checks the tag matches all three version files, builds with `./build.sh`, and publishes `apple-mail.mcpb` and `apple-mail-X.Y.Z.mcpb` to a GitHub release whose notes are that version's CHANGELOG section.
 
 ## License
 
