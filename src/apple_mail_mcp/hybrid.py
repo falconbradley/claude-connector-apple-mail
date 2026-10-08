@@ -80,7 +80,14 @@ class HybridBridge:
             )
         return self._env
 
-    def _jxa(self) -> MailBridge:
+    def _jxa(self, for_message: Optional[int] = None) -> MailBridge:
+        """The JXA bridge, constructed on first use.
+
+        When `for_message` is given, the Envelope Index's idea of where that
+        message lives is handed to the bridge up front. That lets JXA address
+        the message directly instead of prescanning every mailbox and then
+        scanning for it -- seconds of work, on every uncached message.
+        """
         if self._mail is None:
             try:
                 self._mail = MailBridge()
@@ -98,7 +105,22 @@ class HybridBridge:
                     "Settings -> Privacy & Security -> Automation."
                     f"\n\nUnderlying error: {exc}{hint}"
                 )
+        if for_message is not None:
+            self._seed_location(self._mail, for_message)
         return self._mail
+
+    def _seed_location(self, mail: MailBridge, message_id: int) -> None:
+        """Tell the JXA bridge where a message lives, if the index knows."""
+        env = self._envelope()
+        if env is None:
+            return
+        try:
+            location = env.get_message_location(message_id)
+        except Exception:
+            logger.debug("Could not seed location for %d.", message_id, exc_info=True)
+            return
+        if location is not None:
+            mail.remember_location(message_id, location[0], location[1])
 
     def fast_path_status(self) -> str:
         if os.environ.get("APPLE_MAIL_MCP_DISABLE_FAST"):
@@ -171,7 +193,9 @@ class HybridBridge:
                 # Mail.app fetch it from the server via JXA.
             except Exception:
                 logger.exception("Fast attachment fetch failed; trying JXA.")
-        result = self._jxa().get_attachment(message_id, attachment_index)
+        result = self._jxa(for_message=message_id).get_attachment(
+            message_id, attachment_index
+        )
         self.last_engine = "applescript"
         return result
 
@@ -201,7 +225,7 @@ class HybridBridge:
                     }
                 # Flagged but color unknown -> ask Mail.app, tolerate failure
                 try:
-                    return self._jxa().get_flag(message_id)
+                    return self._jxa(for_message=message_id).get_flag(message_id)
                 except Exception:
                     logger.warning(
                         "Could not resolve flag color for %d via JXA.", message_id
@@ -215,7 +239,7 @@ class HybridBridge:
                 raise
             except Exception:
                 logger.exception("Fast get_flag failed; falling back to JXA.")
-        result = self._jxa().get_flag(message_id)
+        result = self._jxa(for_message=message_id).get_flag(message_id)
         self.last_engine = "applescript"
         return result
 
@@ -231,7 +255,7 @@ class HybridBridge:
     # ------------------------------------------------------------------
 
     def set_flag(self, message_id: int, flag: Optional[str] = None) -> dict:
-        return self._jxa().set_flag(message_id, flag)
+        return self._jxa(for_message=message_id).set_flag(message_id, flag)
 
     def create_draft(self, **kwargs: Any) -> dict:
         return self._jxa().create_draft(**kwargs)

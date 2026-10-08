@@ -181,6 +181,43 @@ def _require_bridge() -> HybridBridge:
     return _bridge
 
 
+# Distinguishes "the caller said nothing about the flag" from "the caller
+# explicitly asked to remove it". Removing a flag is destructive -- the
+# inbox-review routine treats a flag as to-do state -- so it has to be asked
+# for, never the fallout of a parameter name the MCP layer quietly dropped.
+# (Seen in the wild on 2026-09-20: set_email_flag(message_id=..., flag_color=
+# "green") had its unknown kwarg discarded, `flag` fell back to its None
+# default, and four live orange flags were cleared reporting success.)
+_FLAG_ARG_UNSET = "__unset__"
+
+
+def _pick_flag_argument(flag: Optional[str], flag_color: Optional[str]) -> Optional[str]:
+    """Resolve the `flag`/`flag_color` aliases into the one requested value.
+
+    Raises if the caller supplied neither, so that a mistyped parameter name
+    surfaces as an error instead of silently unflagging the message.
+    """
+    flag_given = flag != _FLAG_ARG_UNSET
+    color_given = flag_color != _FLAG_ARG_UNSET
+    if flag_given and color_given:
+        if flag != flag_color:
+            raise ValueError(
+                f"Conflicting arguments: flag={flag!r} and flag_color={flag_color!r}. "
+                "They are aliases -- pass only one."
+            )
+        return flag
+    if flag_given:
+        return flag
+    if color_given:
+        return flag_color
+    raise ValueError(
+        "set_email_flag requires a flag: pass a color "
+        f"({', '.join(sorted(_VALID_FLAG_COLORS))}) to set one, or an explicit "
+        "null to remove the existing flag. Removing a flag is destructive, so "
+        "it is never the default -- if you meant to remove it, say so."
+    )
+
+
 def _optional(value: Optional[str]) -> Optional[str]:
     """Normalise an optional string argument from the MCP client.
 
@@ -1018,31 +1055,50 @@ def get_email_flag(message_id: int) -> FlagStatus:
 @mcp.tool()
 def set_email_flag(
     message_id: int,
-    flag: Optional[str] = None,
+    flag: Optional[str] = _FLAG_ARG_UNSET,
+    flag_color: Optional[str] = _FLAG_ARG_UNSET,
 ) -> FlagResult:
     """Set or remove the flag on an email in Apple Mail.
 
     Args:
         message_id: The integer ID from search_emails results.
         flag: Flag color to set: "red", "orange", "yellow", "green", "blue",
-              "purple", or "gray". Pass null/None to remove the flag.
+              "purple", or "gray". Pass null explicitly to remove the flag.
+        flag_color: Alias for `flag`, matching the field name get_email_flag
+              returns. Pass one or the other, not both.
     """
-    flag = _optional(flag)  # "null" from the client means remove, as documented
-    if flag is not None and flag not in _VALID_FLAG_COLORS:
+    requested = _pick_flag_argument(flag, flag_color)
+    requested = _optional(requested)  # "null" means remove, as documented
+    if requested is not None and requested not in _VALID_FLAG_COLORS:
         raise ValueError(
-            f"Invalid flag color {flag!r}. "
+            f"Invalid flag color {requested!r}. "
             f"Choose from: {', '.join(sorted(_VALID_FLAG_COLORS))}, or null to remove."
         )
     bridge = _require_bridge()
-    result = bridge.set_flag(message_id, flag)
+    result = bridge.set_flag(message_id, requested)
     if not result.get("success"):
         raise RuntimeError(f"Failed to set flag on message {message_id}.")
-    # Use the color_index read back from Mail.app — the actual stored color
-    # is the source of truth for what the user will see in Mail's UI.
-    actual_color: Optional[str] = None
+
+    # The JXA in set_flag reports success whenever the *script* ran, so confirm
+    # the write actually landed before telling the caller it did. color_index
+    # is Mail.app's own read-back -- the source of truth for what the user sees.
+    is_flagged = bool(result.get("is_flagged", False))
     color_index = result.get("color_index", -1)
+    actual_color: Optional[str] = None
     if isinstance(color_index, int) and 0 <= color_index <= 6:
         actual_color = _FLAG_COLOR_ORDER[color_index]
+
+    if requested is None:
+        if is_flagged:
+            raise RuntimeError(
+                f"Failed to remove the flag on message {message_id}: Mail.app "
+                f"still reports it flagged ({actual_color or 'unknown color'})."
+            )
+    elif not is_flagged or actual_color != requested:
+        raise RuntimeError(
+            f"Failed to set the {requested!r} flag on message {message_id}: "
+            f"Mail.app stored {actual_color or 'no flag'} instead."
+        )
     return FlagResult(message_id=message_id, flag_color=actual_color, success=True)
 
 

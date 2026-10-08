@@ -70,6 +70,11 @@ class _Deadline:
 
 # Flag color name → flagIndex integer (-1 = no flag, 0–6 = red … gray).
 # Mail.app's flagIndex property is 0-based: 0=red, 1=orange, …, 6=gray.
+# CONFIRMED on macOS 27.0 / Mail 16.0 by writing each index 0-6 and reading it
+# back from a separate process; flagIndex round-trips exactly, with no IMAP
+# normalisation and no commit delay. See docs/flag-index.md.
+# The Envelope Index stores the same 0-6 value in bits 39-41 of messages.flags
+# (NOT in messages.flag_color, which is not a colour index) -- see envelope.py.
 _FLAG_COLOR_MAP: dict[str, int] = {
     "red": 0, "orange": 1, "yellow": 2,
     "green": 3, "blue": 4, "purple": 5, "gray": 6,
@@ -160,44 +165,31 @@ class MailBridge:
     """Bridge to Mail.app via JXA (JavaScript for Automation)."""
 
     _message_cache: dict[int, tuple[str, str, Optional[int]]]  # msg_id -> (account, mailbox, index)
-    _nonempty_mailboxes: set[tuple[str, str]]  # (account_name, mailbox_name)
+    _nonempty_cache: Optional[set[tuple[str, str]]]  # (account_name, mailbox_name)
 
     def __init__(self) -> None:
         """Verify Mail.app is running. Raise RuntimeError with helpful message if not."""
         self._message_cache = {}
-        self._nonempty_mailboxes = set()
+        self._nonempty_cache = None
 
-        # Check if Mail.app is running and pre-scan mailbox counts in one call.
-        # This avoids per-mailbox IMAP queries during search_messages.
+        # Only check that Mail is running here. The mailbox prescan used to run
+        # in this same call, and it dominated construction: counting messages
+        # (`mb.messages.length`) over every mailbox measured ~20s warm and over
+        # 40s cold on a 4-account store, which is 97% of the cost and blew the
+        # timeout before the actual query had even started. It is now lazy --
+        # see _nonempty_mailboxes() -- so callers that can resolve a message
+        # another way (the Envelope Index seeds locations via
+        # remember_location) never pay for it at all.
         init_script = """
         (function() {
             var se = Application("System Events");
             var procs = se.processes.whose({name: "Mail"});
             if (procs.length === 0) return JSON.stringify({"running": false});
-
-            var mail = Application("Mail");
-            var accounts = mail.accounts();
-            var mboxes = [];
-            for (var i = 0; i < accounts.length; i++) {
-                if (!accounts[i].enabled()) continue;
-                var acctName = accounts[i].name();
-                var mbs = accounts[i].mailboxes();
-                for (var j = 0; j < mbs.length; j++) {
-                    var mb = mbs[j];
-                    var mc = mb.messages.length;
-                    if (mc > 0) {
-                        mboxes.push({"account": acctName, "mailbox": mb.name(), "count": mc});
-                    }
-                }
-            }
-            return JSON.stringify({"running": true, "nonempty": mboxes});
+            return JSON.stringify({"running": true});
         })();
         """
         try:
-            # Must stay well under the client's 60s: this prescan runs lazily
-            # on the first tool call, and whatever it spends is taken out of
-            # that same call's budget before the actual query even starts.
-            result = self._run_jxa(init_script, timeout=40)
+            result = self._run_jxa(init_script, timeout=20)
         except RuntimeError:
             raise RuntimeError(
                 "Mail.app is not running. Please open Mail.app and try again."
@@ -208,14 +200,72 @@ class MailBridge:
                 "Mail.app is not running. Please open Mail.app and try again."
             )
 
-        # Cache non-empty mailboxes to skip slow IMAP queries during search
-        for mb in result.get("nonempty", []):
-            self._nonempty_mailboxes.add((mb["account"], mb["mailbox"]))
+        logger.info("MailBridge initialised.")
 
-        logger.info(
-            "MailBridge initialised — %d non-empty mailboxes.",
-            len(self._nonempty_mailboxes),
-        )
+    def remember_location(
+        self, message_id: int, account_name: str, mailbox_name: str
+    ) -> None:
+        """Seed the location cache so _find_message can skip the mailbox scan.
+
+        HybridBridge calls this with what the Envelope Index already knows, so
+        a flag read/write costs one targeted JXA call instead of a prescan plus
+        a scan over every non-empty mailbox.
+        """
+        if account_name and mailbox_name:
+            self._message_cache.setdefault(
+                message_id, (account_name, mailbox_name, None)
+            )
+
+    def _nonempty_mailboxes(
+        self, deadline: Optional[_Deadline] = None
+    ) -> set[tuple[str, str]]:
+        """Mailboxes with at least one message, computed on first use.
+
+        Counting messages per mailbox is the single most expensive thing this
+        bridge does (seconds per IMAP account, and Mail serves it cold the
+        first time), so it is deferred until something actually needs to scan
+        mailboxes rather than paid on every construction.
+
+        When called inside a budgeted tool call, pass that call's `deadline`:
+        this scan now runs *within* the tool call rather than before it, so
+        without the budget it could spend its own ceiling on top of the
+        search's and overrun the client's timeout.
+        """
+        if self._nonempty_cache is not None:
+            return self._nonempty_cache
+
+        script = """
+        (function() {
+            var mail = Application("Mail");
+            var accounts = mail.accounts();
+            var mboxes = [];
+            for (var i = 0; i < accounts.length; i++) {
+                if (!accounts[i].enabled()) continue;
+                var acctName = accounts[i].name();
+                var mbs = accounts[i].mailboxes();
+                for (var j = 0; j < mbs.length; j++) {
+                    var mb = mbs[j];
+                    if (mb.messages.length > 0) {
+                        mboxes.push({"account": acctName, "mailbox": mb.name()});
+                    }
+                }
+            }
+            return JSON.stringify({"nonempty": mboxes});
+        })();
+        """
+        try:
+            result = self._run_jxa(script, timeout=55, deadline=deadline)
+        except RuntimeError:
+            logger.warning("Mailbox prescan timed out; treating every mailbox as empty.")
+            return set()
+
+        found = {
+            (mb["account"], mb["mailbox"])
+            for mb in (result or {}).get("nonempty", [])
+        }
+        self._nonempty_cache = found
+        logger.info("Mailbox prescan: %d non-empty mailboxes.", len(found))
+        return found
 
     # ------------------------------------------------------------------
     # JXA execution
@@ -586,7 +636,7 @@ class MailBridge:
         # Build a JS set of non-empty mailbox keys to skip slow IMAP queries
         nonempty_keys = [
             f'"{_js_escape(a)}|{_js_escape(m)}"'
-            for a, m in self._nonempty_mailboxes
+            for a, m in self._nonempty_mailboxes(deadline=budget)
         ]
         nonempty_set_js = "var _ne = {" + ",".join(
             f"{k}: 1" for k in nonempty_keys
@@ -868,13 +918,23 @@ class MailBridge:
             msg_lookup_js = f"""
             var msg = mb.messages[{msg_idx}];
             if (msg.id() !== {message_id}) {{
-                var msgs = mb.messages.whose({{id: {message_id}}});
+                // byId resolves in ~17ms where whose by id scans the mailbox
+                // (5.2s on a 46k-message INBOX). Safe here: we already know the
+                // message is meant to be in this mailbox. See _find_message for
+                // why it must NOT be used to test membership.
+                var msgs = [];
+                try {{ var _m = mb.messages.byId({message_id}); _m.id(); msgs = [_m]; }} catch (e) {{}}
                 if (msgs.length === 0) return JSON.stringify(null);
                 msg = msgs[0];
             }}"""
         else:
             msg_lookup_js = f"""
-            var msgs = mb.messages.whose({{id: {message_id}}});
+            // byId resolves in ~17ms where whose by id scans the mailbox
+            // (5.2s on a 46k-message INBOX). Safe here: we already know the
+            // message is meant to be in this mailbox. See _find_message for
+            // why it must NOT be used to test membership.
+            var msgs = [];
+            try {{ var _m = mb.messages.byId({message_id}); _m.id(); msgs = [_m]; }} catch (e) {{}}
             if (msgs.length === 0) return JSON.stringify(null);
             var msg = msgs[0];"""
 
@@ -915,13 +975,23 @@ class MailBridge:
             msg_lookup_js = f"""
             var msg = mb.messages[{msg_idx}];
             if (msg.id() !== {message_id}) {{
-                var msgs = mb.messages.whose({{id: {message_id}}});
+                // byId resolves in ~17ms where whose by id scans the mailbox
+                // (5.2s on a 46k-message INBOX). Safe here: we already know the
+                // message is meant to be in this mailbox. See _find_message for
+                // why it must NOT be used to test membership.
+                var msgs = [];
+                try {{ var _m = mb.messages.byId({message_id}); _m.id(); msgs = [_m]; }} catch (e) {{}}
                 if (msgs.length === 0) return JSON.stringify(null);
                 msg = msgs[0];
             }}"""
         else:
             msg_lookup_js = f"""
-            var msgs = mb.messages.whose({{id: {message_id}}});
+            // byId resolves in ~17ms where whose by id scans the mailbox
+            // (5.2s on a 46k-message INBOX). Safe here: we already know the
+            // message is meant to be in this mailbox. See _find_message for
+            // why it must NOT be used to test membership.
+            var msgs = [];
+            try {{ var _m = mb.messages.byId({message_id}); _m.id(); msgs = [_m]; }} catch (e) {{}}
             if (msgs.length === 0) return JSON.stringify(null);
             var msg = msgs[0];"""
 
@@ -1018,7 +1088,12 @@ class MailBridge:
             if (mboxes.length === 0) return JSON.stringify(null);
             var mb = mboxes[0];
 
-            var msgs = mb.messages.whose({{id: {message_id}}});
+            // byId resolves in ~17ms where whose by id scans the mailbox
+            // (5.2s on a 46k-message INBOX). Safe here: we already know the
+            // message is meant to be in this mailbox. See _find_message for
+            // why it must NOT be used to test membership.
+            var msgs = [];
+            try {{ var _m = mb.messages.byId({message_id}); _m.id(); msgs = [_m]; }} catch (e) {{}}
             if (msgs.length === 0) return JSON.stringify(null);
 
             var src = msgs[0].source();
@@ -1157,7 +1232,12 @@ class MailBridge:
             if (mboxes.length === 0) return JSON.stringify([]);
             var mb = mboxes[0];
 
-            var msgs = mb.messages.whose({{id: {message_id}}});
+            // byId resolves in ~17ms where whose by id scans the mailbox
+            // (5.2s on a 46k-message INBOX). Safe here: we already know the
+            // message is meant to be in this mailbox. See _find_message for
+            // why it must NOT be used to test membership.
+            var msgs = [];
+            try {{ var _m = mb.messages.byId({message_id}); _m.id(); msgs = [_m]; }} catch (e) {{}}
             if (msgs.length === 0) return JSON.stringify([]);
             var msg = msgs[0];
 
@@ -1219,7 +1299,12 @@ class MailBridge:
                 if (mboxes.length === 0) return JSON.stringify(null);
                 var mb = mboxes[0];
 
-                var msgs = mb.messages.whose({{id: {message_id}}});
+                // byId resolves in ~17ms where whose by id scans the mailbox
+                // (5.2s on a 46k-message INBOX). Safe here: we already know the
+                // message is meant to be in this mailbox. See _find_message for
+                // why it must NOT be used to test membership.
+                var msgs = [];
+                try {{ var _m = mb.messages.byId({message_id}); _m.id(); msgs = [_m]; }} catch (e) {{}}
                 if (msgs.length === 0) return JSON.stringify(null);
                 var msg = msgs[0];
 
@@ -1799,7 +1884,12 @@ end tell"""
             if (mboxes.length === 0) return JSON.stringify(null);
             var mb = mboxes[0];
 
-            var msgs = mb.messages.whose({{id: {message_id}}});
+            // byId resolves in ~17ms where whose by id scans the mailbox
+            // (5.2s on a 46k-message INBOX). Safe here: we already know the
+            // message is meant to be in this mailbox. See _find_message for
+            // why it must NOT be used to test membership.
+            var msgs = [];
+            try {{ var _m = mb.messages.byId({message_id}); _m.id(); msgs = [_m]; }} catch (e) {{}}
             if (msgs.length === 0) return JSON.stringify(null);
             var msg = msgs[0];
 
@@ -1856,7 +1946,12 @@ end tell"""
             if (mboxes.length === 0) return JSON.stringify({{success: false, error: "mailbox not found"}});
             var mb = mboxes[0];
 
-            var msgs = mb.messages.whose({{id: {message_id}}});
+            // byId resolves in ~17ms where whose by id scans the mailbox
+            // (5.2s on a 46k-message INBOX). Safe here: we already know the
+            // message is meant to be in this mailbox. See _find_message for
+            // why it must NOT be used to test membership.
+            var msgs = [];
+            try {{ var _m = mb.messages.byId({message_id}); _m.id(); msgs = [_m]; }} catch (e) {{}}
             if (msgs.length === 0) return JSON.stringify({{success: false, error: "message not found"}});
             var msg = msgs[0];
 
@@ -1875,7 +1970,11 @@ end tell"""
             }}
 
             var isFlagged = msg.flaggedStatus() ? true : false;
-            // Read back the actual flag index so the caller knows the true resulting color.
+            // Read back the actual flag index so the caller knows the true resulting
+            // color. This in-script read-back is trustworthy: flagIndex was verified
+            // to round-trip across process boundaries (docs/flag-index.md). The caller
+            // still compares it against what was requested, so the flaggedStatus
+            // fallback above (always red) cannot be reported as a successful write.
             var actualIdx = isFlagged ? 0 : -1;
             try {{ actualIdx = msg.flagIndex(); }} catch(e) {{}}
             return JSON.stringify({{success: true, is_flagged: isFlagged, color_index: actualIdx}});
@@ -1907,7 +2006,7 @@ end tell"""
         logger.debug("Cache miss for message %d, searching non-empty mailboxes...", message_id)
         nonempty_keys = [
             f'"{_js_escape(a)}|{_js_escape(m)}"'
-            for a, m in self._nonempty_mailboxes
+            for a, m in self._nonempty_mailboxes()
         ]
         nonempty_set_js = "var _ne = {" + ",".join(
             f"{k}: 1" for k in nonempty_keys
@@ -1926,6 +2025,9 @@ end tell"""
                     var mbName = mb.name();
                     if (!_ne[acctName + "|" + mbName]) continue;
                     try {{
+                        // Must stay whose(): byId resolves app-wide and
+                        // ignores the mailbox it is rooted at, so it would
+                        // report a hit for every mailbox we probe here.
                         var msgs = mb.messages.whose({{id: {message_id}}});
                         if (msgs.length > 0) {{
                             return JSON.stringify({{

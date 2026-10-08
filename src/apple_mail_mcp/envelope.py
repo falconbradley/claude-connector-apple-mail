@@ -57,6 +57,20 @@ _FLAG_BIT_FLAGGED = 1 << 4
 _FLAG_ATTACH_SHIFT = 10  # bits 10-15: attachment count
 _FLAG_ATTACH_MASK = 0x3F
 
+# Bits 39-41 of `messages.flags` hold the flag colour, using the same 0-6
+# encoding as Mail.app's AppleScript/JXA `flagIndex` (0=red … 6=gray).
+# Ground-truthed on macOS 27.0 / Mail 16.0 by writing each flagIndex 0-6 via
+# JXA and reading it back from a separate process; see docs/flag-index.md.
+#
+# Two things to know:
+#   - The `messages.flag_color` column is NOT a colour index. It only ever
+#     holds 0 or 1 and does not track the colour -- trusting it made 17 of 22
+#     flagged messages read back as the wrong colour.
+#   - These bits keep their last value after a message is unflagged, so the
+#     colour is only meaningful when _FLAG_BIT_FLAGGED is also set.
+_FLAG_COLOR_SHIFT = 39
+_FLAG_COLOR_MASK = 0x7 << _FLAG_COLOR_SHIFT
+
 # Minimum interval between full re-walks of the Mail dir for .emlx lookup.
 _EMLX_RESCAN_INTERVAL = 30.0
 
@@ -251,8 +265,12 @@ class EnvelopeIndexBridge:
             "COALESCE(m.subject_prefix, '')" if "subject_prefix" in mcols else "''"
         )
         self._has_conversation = "conversation_id" in mcols
-        self._flag_color_col = next(
-            (c for c in ("flag_color",) if c in mcols), None
+        # Colour comes out of the flags bitfield, never the misleading
+        # `flag_color` column (see _FLAG_COLOR_SHIFT above). When there is no
+        # flags column we report -1 so callers fall back to JXA for the colour.
+        self._flag_color_expr = (
+            f"((m.flags & {_FLAG_COLOR_MASK}) >> {_FLAG_COLOR_SHIFT})"
+            if "flags" in mcols else "-1"
         )
 
         # recipients / attachments linkage columns vary across versions
@@ -992,24 +1010,44 @@ class EnvelopeIndexBridge:
     # Flags (read side)
     # ------------------------------------------------------------------
 
-    def get_flag(self, message_id: int) -> dict:
-        """Flag state from the index. Color is only available when the
-        schema exposes it; callers needing an authoritative color should
-        use the JXA bridge when is_flagged is true and color_index < 0."""
-        color_select = (
-            f"m.{self._flag_color_col}" if self._flag_color_col else "-1"
-        )
+    def get_message_location(self, message_id: int) -> Optional[tuple[str, str]]:
+        """(account_name, mailbox_name) for a message, straight from the index.
+
+        Lets the JXA bridge skip its mailbox prescan-and-scan, which costs
+        seconds. Returns None when the message or its mailbox is unknown.
+        """
         rows = self._query(
-            f"SELECT {self._flagged_expr}, {color_select} "
+            "SELECT m.mailbox FROM messages m WHERE m.ROWID = ?", (message_id,)
+        )
+        if not rows:
+            return None
+        account, mailbox, _url = self._mailbox_info(rows[0][0])
+        if not account or not mailbox:
+            return None
+        return account, mailbox
+
+    def get_flag(self, message_id: int) -> dict:
+        """Flag state from the index.
+
+        The colour is decoded from bits 39-41 of the flags bitfield, which use
+        the same 0-6 encoding as Mail.app's `flagIndex`. Callers needing an
+        authoritative colour should use the JXA bridge when is_flagged is true
+        and color_index < 0.
+        """
+        rows = self._query(
+            f"SELECT {self._flagged_expr}, {self._flag_color_expr} "
             "FROM messages m WHERE m.ROWID = ?",
             (message_id,),
         )
         if not rows:
             raise ValueError(f"Message {message_id} not found.")
         flagged, color_index = rows[0]
-        if not flagged:
+        # The colour bits are stale residue once the flagged bit is clear.
+        if not flagged or not isinstance(color_index, int):
+            color_index = -1
+        elif not 0 <= color_index <= 6:
             color_index = -1
         return {
             "is_flagged": bool(flagged),
-            "color_index": color_index if isinstance(color_index, int) else -1,
+            "color_index": color_index,
         }
