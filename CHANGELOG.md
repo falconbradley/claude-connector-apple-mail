@@ -3,6 +3,26 @@
 All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — 2026-10-08
+
+### Breaking
+
+- **`set_email_flag` no longer removes a flag by default.** Omitting the flag argument used to clear the flag and report success, so a misspelled parameter name (dropped by the MCP layer) silently unflagged messages. It now raises; pass an explicit `null` to remove a flag. `flag_color` is accepted as an alias for `flag`, and a write that Mail did not actually store raises instead of reporting success.
+
+### Added
+
+- **Quick reply and quick forward, off by default.** `send_email_reply` replies and sends; `send_email_forward` forwards with attachments and an optional note, and sends. Both use Mail's native reply/forward, so threading, quoting and attachments behave as in Mail. They refuse unless the new **Allow sending email** extension setting is on, and carry destructive/open-world tool annotations so hosts can require approval per send. Nothing is sent until the saved message has been read back and checked: the reply text or note must be at the top of the body and a forward's recipients must match exactly; otherwise it is left open in Mail as a draft. A timeout is reported as an unknown outcome with an explicit instruction not to retry. Results report `sent`, `sent_unconfirmed` or `queued_in_outbox`, with a link to the Sent copy when found.
+- **`preview_thread`** renders a whole conversation inline as an MCP Apps card: one collapsible row per message, newest open.
+- **`get_email_link(scope="thread")`** returns a link resolved at click time that follows the conversation as replies arrive. Mail.app cannot open a conversation, so it fronts the newest message and says so.
+
+### Fixed
+
+- **Flag colours read back correctly.** The colour now comes from bits 39–41 of the Envelope Index's flags field; the `flag_color` column it used before only ever holds 0 or 1, and 17 of 22 flagged messages read back as the wrong colour.
+- **Reply drafts whose text contained a double quote failed.** AppleScript strings were escaped by doubling quotes, which is a syntax error; they now use backslash escapes.
+- **Flag and attachment calls no longer stall for tens of seconds.** The AppleScript bridge stopped counting every mailbox at start-up (20–40s on a large store), finds messages by id directly (~17ms instead of ~5s on a large inbox), and is told each message's mailbox by the Envelope Index.
+- Conversations are titled from their root message, so a reply retitled by a mail gateway does not rename the thread.
+- The open-in-Mail redirector's success page closes its own browser tab.
+
 ## [1.2.5] — 2026-10-06
 
 ### Changed
