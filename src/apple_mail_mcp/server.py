@@ -23,6 +23,7 @@ Tools provided
   get_selected_emails   - Messages currently selected in Mail.app (with links)
   get_email_html        - HTML body of a specific email
   get_thread            - All emails in a conversation thread
+  preview_thread        - The whole conversation as an inline card (MCP Apps)
   list_email_attachments - Enumerate attachments for an email
   get_email_attachment   - Download attachment as base64
   get_email_flag        - Flag status and color for a message
@@ -63,15 +64,21 @@ from .applescript import _FLAG_COLOR_ORDER
 from .emlx import get_html_body
 from .hybrid import HybridBridge
 from .preview import (
+    DEFAULT_THREAD_LIMIT,
+    THREAD_UI_RESOURCE_URI,
     UI_MIME_TYPE,
     UI_RESOURCE_META,
     UI_RESOURCE_URI,
+    apply_thread_html_budget,
     build_preview_payload,
     build_preview_result,
+    build_thread_payload,
     extract_html_body,
     load_preview_html,
+    load_thread_preview_html,
 )
-from .weblink import WebLinkServer
+from .applescript import _strip_subject_prefixes
+from .weblink import ThreadAnchor, WebLinkServer
 from .models import (
     Attachment,
     AttachmentData,
@@ -120,7 +127,14 @@ mcp = _Server(
         "list and retrieve attachments, and create draft emails. "
         "When the user wants to see an email (\"show me\", \"pull up\", "
         "\"preview\"), call preview_email: it renders the message as a card "
-        "in the chat. Use get_email when you only need the content yourself."
+        "in the chat. When they want the conversation rather than one "
+        "message (\"the thread\", \"the back-and-forth\", \"the whole "
+        "exchange\"), call preview_thread. Use get_email/get_thread when you "
+        "only need the content yourself. Links come in the same two scopes: "
+        "get_email_link(scope=\"message\") for one email, scope=\"thread\" "
+        "for its conversation -- but Mail.app cannot open a conversation, so "
+        "a thread link only fronts its newest message; preview_thread is "
+        "what actually shows the exchange."
     ),
 )
 
@@ -195,7 +209,8 @@ def _get_weblink() -> WebLinkServer:
     global _weblink
     if _weblink is None:
         _weblink = WebLinkServer(
-            resolve_rfc_id=lambda mid: _require_bridge().get_message_id_header(mid)
+            resolve_rfc_id=lambda mid: _require_bridge().get_message_id_header(mid),
+            resolve_thread=_resolve_thread_anchor,
         )
     return _weblink
 
@@ -206,6 +221,55 @@ def _make_open_link(message_id: int) -> Optional[str]:
     except Exception:
         logger.exception("Could not build open_link for %d", message_id)
         return None
+
+
+def _make_thread_link(message_id: int) -> Optional[str]:
+    try:
+        return _get_weblink().thread_link(message_id)
+    except Exception:
+        logger.exception("Could not build thread_link for %d", message_id)
+        return None
+
+
+def _thread_rows(message_id: int) -> list[dict]:
+    """Conversation members, oldest first, with the message itself as backstop.
+
+    ``get_thread_messages`` returns [] when the message has no conversation
+    id (and the JXA fallback when the subject search comes up empty); treat
+    that as a thread of one rather than an error, so every message has a
+    thread even if it is only itself.
+    """
+    bridge = _require_bridge()
+    rows = bridge.get_thread_messages(message_id)
+    if rows:
+        return rows
+    d = bridge.get_message(message_id)
+    return [d] if d else []
+
+
+def _resolve_thread_anchor(message_id: int) -> Optional[ThreadAnchor]:
+    """Pick the message a /thread/<id> click should front in Mail.app.
+
+    The newest member of the conversation that actually has a Message-ID --
+    "the latest state of this thread", which is what someone asking to open
+    a thread almost always means. Resolved at click time, so a thread link
+    in an old transcript follows the conversation as it grows. Drafts have
+    no Message-ID until they are sent, so the walk skips backwards past
+    them rather than failing.
+    """
+    rows = _thread_rows(message_id)
+    if not rows:
+        return None
+    for row in reversed(rows):
+        rfc_id = row.get("message_id") or None
+        if not rfc_id:
+            continue
+        return ThreadAnchor(
+            message_id=row.get("id", message_id),
+            rfc_id=rfc_id,
+            total=len(rows),
+        )
+    return None
 
 
 def _dict_to_summary(d: dict) -> EmailSummary:
@@ -531,24 +595,72 @@ def preview_email(message_id: int) -> CallToolResult:
 
 
 @mcp.tool()
-def get_email_link(message_id: int) -> dict:
-    """Get links that open an email in Mail.app.
+def get_email_link(message_id: int, scope: str = "message") -> dict:
+    """Get links that open an email — or its whole thread — in Mail.app.
 
     Lightweight alternative to get_email when you only need the link.
-    Returns open_link (localhost http:// URL — clickable in chat UIs)
-    and mail_link (raw message:// URL — blocked by most chat UIs).
+
+    Choosing a scope — ask what the user wants to land on:
+      - "message" (default): this one email. Right for "send me a link to
+        that invoice", or any reference to a specific message.
+      - "thread": the conversation the email belongs to. Right for "link me
+        to that thread", "the whole back-and-forth", "the exchange with
+        Alice". The link resolves the conversation when it is *clicked*, so
+        it follows the thread as new replies arrive.
+
+    Honest limit on thread links: Mail.app has no conversation URL, so a
+    thread link fronts the conversation's newest message and relies on
+    Mail's own Organize by Conversation to group the rest. If the user
+    wants to actually read the back-and-forth, call preview_thread instead
+    — it renders every message inline in the chat.
+
+    Returns open_link (localhost http:// URL — clickable in chat UIs),
+    mail_link (raw message:// URL — blocked by most chat UIs), and, for
+    scope="thread", thread_link plus the thread's size and newest message.
 
     Args:
         message_id: The integer ID from search_emails results.
+        scope: "message" (default) or "thread".
     """
+    normalized = (_optional(scope) or "message").strip().lower()
+    if normalized not in ("message", "thread"):
+        raise ValueError(
+            f"scope must be 'message' or 'thread', not {scope!r}."
+        )
+
     bridge = _require_bridge()
-    rfc_id = bridge.get_message_id_header(message_id)
-    if rfc_id is None:
-        raise ValueError(f"Message {message_id} not found.")
+
+    if normalized == "message":
+        rfc_id = bridge.get_message_id_header(message_id)
+        if rfc_id is None:
+            raise ValueError(f"Message {message_id} not found.")
+        return {
+            "scope": "message",
+            "message_id": message_id,
+            "mail_link": _make_mail_link(rfc_id),
+            "open_link": _make_open_link(message_id),
+        }
+
+    anchor = _resolve_thread_anchor(message_id)
+    if anchor is None:
+        raise ValueError(
+            f"Message {message_id} not found, or no message in its thread "
+            "has a Message-ID yet."
+        )
     return {
+        "scope": "thread",
         "message_id": message_id,
-        "mail_link": _make_mail_link(rfc_id),
-        "open_link": _make_open_link(message_id),
+        "thread_size": anchor.total,
+        "newest_message_id": anchor.message_id,
+        # The thread link re-resolves on click; the message links are the
+        # newest message's, for hosts that cannot reach the redirector.
+        "thread_link": _make_thread_link(message_id),
+        "mail_link": _make_mail_link(anchor.rfc_id),
+        "open_link": _make_open_link(anchor.message_id),
+        "note": (
+            "Mail.app cannot open a conversation — this fronts the thread's "
+            "newest message. Use preview_thread to show the back-and-forth."
+        ),
     }
 
 
@@ -660,22 +772,179 @@ def get_email_html(message_id: int) -> dict:
 
 @mcp.tool()
 def get_thread(message_id: int) -> list[EmailSummary]:
-    """Return all emails in the same conversation thread as the given message.
+    """Read a conversation's messages for your own use (to SHOW the thread
+    to the user, call preview_thread instead — it renders a card).
 
-    Messages are returned in chronological order (oldest first).
+    Returns summaries only — no bodies — in chronological order (oldest
+    first). Each carries its own single-message links; for a link to the
+    conversation as a whole, call get_email_link with scope="thread".
 
     Args:
         message_id: Any email ID in the thread.
     """
-    bridge = _require_bridge()
-    rows = bridge.get_thread_messages(message_id)
+    rows = _thread_rows(message_id)
     if not rows:
-        # Fall back to returning the single message
-        d = bridge.get_message(message_id)
-        if d:
-            return [_dict_to_summary(d)]
         raise ValueError(f"Message {message_id} not found.")
     return [_dict_to_summary(r) for r in rows]
+
+
+def _thread_subject(rows: list[dict]) -> str:
+    """Title a conversation from its oldest message, falling back forwards.
+
+    ``_strip_subject_prefixes`` only removes leading Re:/Fwd:, so a reply
+    that a mail gateway retitled "[EXTERNAL]Re: ..." would keep the banner;
+    the root message has neither.
+    """
+    for row in rows:
+        subject = _strip_subject_prefixes(row.get("subject") or "")
+        if subject:
+            return subject
+    return "(no subject)"
+
+
+def _load_thread_entry(row: dict) -> dict:
+    """Build one thread-card message payload from a thread summary row.
+
+    Uses the same field contract as the single-email card, so a row in the
+    thread renders from exactly what ``preview_email`` produces. Fetches
+    the body (and attachments, and flag colour) per message, but only
+    chases the reads the summary says will find something — a 25-message
+    thread should not pay for 25 empty attachment lookups.
+    """
+    bridge = _require_bridge()
+    message_id = row["id"]
+
+    full = bridge.get_message(message_id) or row
+
+    attachments: list[dict] = []
+    if row.get("has_attachments") or full.get("has_attachments"):
+        try:
+            attachments = bridge.list_attachments(message_id)
+        except Exception:
+            logger.exception("Could not list attachments for %d", message_id)
+
+    flag_color: Optional[str] = None
+    if full.get("is_flagged"):
+        try:
+            flag_color = bridge.get_flag(message_id).get("flag_color")
+        except Exception:
+            pass
+
+    body_html: Optional[str] = None
+    try:
+        body_html = extract_html_body(bridge.get_message_source(message_id))
+    except Exception:
+        logger.exception("Could not read HTML body for %d; row shows text.", message_id)
+
+    rfc_id = full.get("message_id") or None
+    return build_preview_payload(
+        full,
+        attachments=attachments,
+        flag_color=flag_color,
+        body_html=body_html,
+        mail_link=_make_mail_link(rfc_id),
+        open_link=_make_open_link(message_id),
+    )
+
+
+@mcp.resource(
+    THREAD_UI_RESOURCE_URI,
+    name="thread_preview",
+    title="Conversation preview card",
+    description=(
+        "Interactive card that renders a whole email conversation inline in "
+        "the chat: every message in the thread, collapsed to one line each "
+        "with the newest open, plus participants, attachments and "
+        "Open-in-Mail buttons. Rendered by hosts that support MCP Apps."
+    ),
+    mime_type=UI_MIME_TYPE,
+    meta=UI_RESOURCE_META,
+)
+def thread_preview_resource() -> str:
+    return load_thread_preview_html()
+
+
+@mcp.tool(
+    # Nested form is the spec; the flat key is the pre-GA format some hosts
+    # still read (the SDK tells hosts to check both). Advertise both.
+    meta={
+        "ui": {"resourceUri": THREAD_UI_RESOURCE_URI},
+        "ui/resourceUri": THREAD_UI_RESOURCE_URI,
+    },
+    structured_output=False,
+)
+def preview_thread(message_id: int, limit: int = DEFAULT_THREAD_LIMIT) -> CallToolResult:
+    """Show the user a whole email conversation as an inline card in the chat.
+
+    Renders every message in the thread the way Mail.app's conversation
+    view would: one row per message with sender, date and a snippet,
+    collapsed except the newest, each expanding to the full body (rich HTML
+    when the message has one, sanitized; plain text otherwise) with its own
+    Open-in-Mail button.
+
+    Use this whenever the user wants the back-and-forth rather than one
+    message — "show me that thread", "the whole exchange with Alice", "what
+    did they say before that", "open the conversation". This is the right
+    answer to "let me see the thread" even when the user asks for a *link*:
+    Mail.app cannot open a conversation (message:// always opens a single
+    message in its own window), so a link can only front one message, while
+    this card shows all of them.
+
+    Use get_thread when you only need to read the thread yourself, and
+    preview_email when the user wants just one message.
+
+    Agent guidance: the card already displays every message, so don't
+    replay the exchange in your reply — a short summary or the answer to
+    the user's question is enough.
+
+    Args:
+        message_id: Any email ID in the thread (from search_emails).
+        limit: Most recent messages to render (default 25). Older messages
+            are counted on the card but not rendered.
+    """
+    rows = _thread_rows(message_id)
+    if not rows:
+        raise ValueError(f"Message {message_id} not found.")
+
+    total = len(rows)
+    shown = rows[-limit:] if limit and limit > 0 else rows
+
+    entries = [_load_thread_entry(row) for row in shown]
+    # Bodies live only in structuredContent, but a long thread of rich mail
+    # can still be megabytes; keep the newest ones rich and drop the rest.
+    dropped = apply_thread_html_budget(entries)
+    if dropped:
+        logger.info(
+            "preview_thread %d: dropped %d HTML bodies over budget.", message_id, dropped
+        )
+
+    # A conversation is named by the message that started it: the root's
+    # subject carries neither the Re:/Fwd: chain nor the [EXTERNAL]-style
+    # banners a gateway staples onto replies. Use rows[0], not shown[0] --
+    # a truncated window must not rename the thread.
+    subject = _thread_subject(rows)
+    anchor = _resolve_thread_anchor(message_id)
+
+    payload = build_thread_payload(
+        entries,
+        subject=subject,
+        total=total,
+        thread_link=_make_thread_link(message_id),
+        mail_link=_make_mail_link(anchor.rfc_id) if anchor else None,
+        open_link=_make_open_link(anchor.message_id) if anchor else None,
+    )
+
+    # What the model reads: the same summaries get_thread returns, with no
+    # bodies — the card has those, and they would only burn context.
+    model_view = {
+        "subject": subject,
+        "message_count": total,
+        "shown_count": len(entries),
+        "messages": [
+            _dict_to_summary(row).model_dump(mode="json") for row in shown
+        ],
+    }
+    return build_preview_result(payload, model_view)
 
 
 @mcp.tool()

@@ -15,11 +15,12 @@ Packaged as an [MCPB desktop extension](https://support.claude.com/en/articles/1
 | `search_emails` | Rich search: free text, sender, recipient (To/CC), subject, date range, read/flagged status, attachments. Every result includes clickable open-in-Mail links |
 | `get_email` | Full email with decoded plain-text body, recipients, flag color, and metadata |
 | `preview_email` | Show an email as an inline preview card in the chat — sender, recipients, date, flags, attachments, rendered body, and an Open-in-Mail button. Same JSON as `get_email` for the model |
-| `get_email_link` | Get a `message://` URL that opens the email directly in Mail.app |
+| `get_email_link` | Links that open an email in Mail.app — `scope="message"` for the single email, `scope="thread"` for its conversation |
 | `open_email_in_mail` | Open an email directly in Mail.app (for chat UIs that block `message://` links) |
 | `get_selected_emails` | The message(s) currently selected in Mail.app's viewer — id, subject, sender, mailbox, and open-in-Mail links |
 | `get_email_html` | HTML body of a message |
-| `get_thread` | All messages in a conversation thread |
+| `get_thread` | All messages in a conversation thread (summaries only, no bodies) |
+| `preview_thread` | Show a whole conversation as one inline card — every message in the thread, collapsed to a line each with the newest open, each expanding to its full body |
 | `list_email_attachments` | Enumerate attachments for any email |
 | `get_email_attachment` | Retrieve attachment content (base64) |
 | `create_email_draft` | Create a draft email saved to Mail.app's Drafts mailbox, returns a `message://` link to open it |
@@ -87,9 +88,35 @@ self-contained document — no SDK, no external assets.
 Every search/thread/email result carries two links:
 
 - **`mail_link`** — the raw `message://<Message-ID>` URL. Works in Terminal (`open '<url>'`), Notes, Reminders, task managers, and Safari — but most chat UIs (including Claude Desktop and Claude Code) block custom URL schemes in rendered links.
-- **`open_link`** — `http://127.0.0.1:<port>/open/<id>?t=<token>`. Chat UIs open http links fine: the click routes through your browser to a tiny localhost-only server inside the extension, which tells macOS to front Mail.app on that message. Requests require a per-install random token (persisted, so links in old conversations keep working); the endpoint's only capability is focusing Mail — it never serves message content.
+- **`open_link`** — `http://127.0.0.1:<port>/open/<id>?t=<token>`. Chat UIs open http links fine: the click routes through your browser to a tiny localhost-only server inside the extension, which tells macOS to front Mail.app on that message. Requests require a per-install random token (persisted, so links in old conversations keep working); the endpoint's only capability is focusing Mail — it never serves message content. **The tab closes itself**: Mail.app coming to the front is the real confirmation, so the success page closes the tab the browser opened for the click instead of leaving it to pile up. Browsers only permit this for a tab with no history to go back to, which is exactly this case; where it is refused the page stays and explains itself. Error pages never auto-close.
 
 There is also an `open_email_in_mail` tool so Claude can jump to a message directly without any clicking.
+
+### Message links vs. thread links
+
+`get_email_link` takes a `scope`, because "link me to that email" and "link
+me to that thread" are different requests:
+
+- **`scope="message"`** (default) — that one email.
+- **`scope="thread"`** — its conversation. Returns a `thread_link`
+  (`http://127.0.0.1:<port>/thread/<id>?t=<token>`) alongside the thread's
+  size and newest message. The conversation is resolved when the link is
+  *clicked*, not when it is generated, so a thread link in an old chat
+  transcript follows the thread as new replies arrive.
+
+**Mail.app cannot open a conversation.** Its only registered URL schemes are
+`mailto:`, `message:` and `mail-pref-pane:`, and `message://` always opens a
+single message in its own window — even when that message is already visible
+in the front viewer with Organize by Conversation on. (Mail's scripting
+interface can't get there either: `message viewer`'s `selected messages` is
+nominally settable but selects the wrong message on current macOS, and
+`visible messages` errors outright.) So a `thread_link` fronts the
+conversation's **newest** message and says so on the result page; Mail's own
+conversation grouping shows the rest.
+
+To actually read a back-and-forth, use **`preview_thread`** — it renders
+every message of the conversation inline in the chat, so nothing depends on
+what Mail.app is willing to open.
 
 ### JXA fallback + writes
 
@@ -175,6 +202,8 @@ Once installed, just ask Claude naturally:
 - *"Show me emails sent to bill@example.com in the last month"*
 - *"What attachments are in the last email from my accountant?"*
 - *"Summarise the email thread about the contract renewal"*
+- *"Show me the whole back-and-forth with Alice"* (renders the conversation as a card)
+- *"Link me to that thread"* (vs. *"link me to that email"*)
 - *"Find flagged emails with PDF attachments"*
 - *"Draft a reply to John's email about the project update"*
 - *"Reply-all to that thread saying I'll review by EOD"*
