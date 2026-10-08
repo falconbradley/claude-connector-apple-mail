@@ -113,11 +113,62 @@ def _js_escape(value: str) -> str:
 def _as_escape(value: str) -> str:
     """Escape a Python string for safe embedding inside an AppleScript string literal.
 
-    AppleScript strings are double-quote delimited; a literal double-quote is
-    escaped by doubling it.  Backslash has no special meaning.  Literal
+    AppleScript strings are double-quote delimited and use backslash escapes:
+    a literal double-quote is written \\" and a literal backslash \\\\.
+    (Doubling the quote, as this helper once did, is a syntax error -- every
+    reply whose text contained a double quote failed to compile.) Literal
     newlines are valid inside AppleScript string literals and need no escaping.
     """
-    return value.replace('"', '""')
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+# Whitespace the send verification ignores. Must match stripWS() in the
+# AppleScript in MailBridge._compose_and_send: Mail re-wraps and re-spaces
+# pasted text, so the check compares text with all of these removed.
+_VERIFY_WS = " \t\r\n   "
+
+
+def _strip_ws(value: str) -> str:
+    """Remove the whitespace characters the send verification ignores."""
+    return value.translate({ord(c): None for c in _VERIFY_WS})
+
+
+def _parse_send_report(raw: str) -> dict:
+    """Parse the line-oriented report printed by the compose-and-send script."""
+    result: dict[str, Any] = {
+        "sent": False,
+        "reason": None,
+        "outbox": None,
+        "subject": "",
+        "from": "",
+        "to_addresses": [],
+        "cc_addresses": [],
+        "bcc_addresses": [],
+    }
+    lines = raw.splitlines()
+    head = lines[0].strip() if lines else ""
+    if head.startswith("ERROR:"):
+        result["reason"] = head[6:]
+        return result
+    result["sent"] = head == "SENT"
+    if head not in ("SENT", "NOTSENT"):
+        result["reason"] = f"unexpected_output:{head[:80]}"
+    for line in lines[1:]:
+        if line.startswith("REASON:"):
+            result["reason"] = line[7:]
+        elif line.startswith("OUTBOX:"):
+            result["outbox"] = line[7:]
+        elif line.startswith("SUBJECT:"):
+            result["subject"] = line[8:]
+        elif line.startswith("FROM:"):
+            result["from"] = line[5:]
+        elif line.startswith("TO:") and line[3:]:
+            result["to_addresses"].append(line[3:])
+        elif line.startswith("CC:") and line[3:]:
+            result["cc_addresses"].append(line[3:])
+        elif line.startswith("BCC:") and line[4:]:
+            result["bcc_addresses"].append(line[4:])
+    return result
 
 
 def _format_quote_attribution(sender: str, date_iso: Optional[str]) -> str:
@@ -1858,6 +1909,405 @@ end tell"""
             elif line.startswith("STATS:"):
                 logger.info("create_reply_draft dedup %s", line[6:])
         return result
+
+    # ------------------------------------------------------------------
+    # Sending (quick reply / quick forward)
+    # ------------------------------------------------------------------
+
+    def send_reply(
+        self,
+        message_id: int,
+        body: str,
+        *,
+        reply_all: bool = False,
+        cc_addresses: list[str] | None = None,
+        bcc_addresses: list[str] | None = None,
+        include_quoted: bool = True,
+    ) -> dict:
+        """Reply to a message and send it, in one Mail.app scripting run.
+
+        See _compose_and_send for the guarantees; in short, nothing is sent
+        unless the reply text is verifiably in the message.
+        """
+        return self._compose_and_send(
+            "reply",
+            message_id,
+            body=body,
+            reply_all=reply_all,
+            to_addresses=None,
+            cc_addresses=cc_addresses,
+            bcc_addresses=bcc_addresses,
+            include_quoted=include_quoted,
+        )
+
+    def send_forward(
+        self,
+        message_id: int,
+        to_addresses: list[str],
+        *,
+        body: str | None = None,
+        cc_addresses: list[str] | None = None,
+        bcc_addresses: list[str] | None = None,
+    ) -> dict:
+        """Forward a message (with its attachments) and send it, in one run."""
+        if not to_addresses:
+            raise ValueError("A forward needs at least one recipient in `to`.")
+        return self._compose_and_send(
+            "forward",
+            message_id,
+            body=body,
+            reply_all=False,
+            to_addresses=to_addresses,
+            cc_addresses=cc_addresses,
+            bcc_addresses=bcc_addresses,
+            include_quoted=True,
+        )
+
+    def _compose_and_send(
+        self,
+        kind: str,
+        message_id: int,
+        *,
+        body: str | None,
+        reply_all: bool,
+        to_addresses: list[str] | None,
+        cc_addresses: list[str] | None,
+        bcc_addresses: list[str] | None,
+        include_quoted: bool,
+    ) -> dict:
+        """Compose a reply or forward with Mail's native command, verify it, send it.
+
+        Composing and sending happen in the SAME script on purpose: AppleScript
+        can only `send` an outgoing message whose compose session is still
+        alive. A draft that outlives its session is an ordinary message in the
+        Drafts mailbox, and scripting has no way to send one of those.
+
+        Order of operations:
+          1. `reply`/`forward ... with opening window`, so Mail builds the
+             native body (quote bar, forwarded headers, attachments).
+          2. Add recipients. A forward starts with none; a reply's come from
+             the original message.
+          3. If there is text to add, focus the body field through the
+             accessibility tree and paste it at the top. A forward window
+             opens with focus in the To field, so a bare paste would land in
+             the address field. The front window's title must equal the
+             message's subject, so the paste can never go to another window.
+          4. `save`, then read the saved draft back and check that its text
+             starts with the requested body and that the recipients match.
+          5. Only then `send`, and watch the Outbox for a few seconds.
+
+        Any failed check before step 5 leaves the message saved as a draft,
+        open in front for the user, and NOT sent.
+
+        Returns a dict with "sent" (bool) and either "reason" (not sent) or
+        "outbox" ("left" / "still_queued"), plus "subject", "from",
+        "to_addresses", "cc_addresses", "bcc_addresses".
+        """
+        location = self._find_message(message_id)
+        if location is None:
+            raise ValueError(f"Message {message_id} not found.")
+        acct_name, mbox_name, _ = location
+        if "draft" in (mbox_name or "").lower():
+            # Mail's reply/forward commands hang indefinitely on a Drafts message.
+            raise ValueError(
+                f"Message {message_id} is in '{mbox_name}'. Pick a received "
+                "message, not a draft."
+            )
+
+        body = body or ""
+        has_body = bool(body.strip())
+        expected_norm = _strip_ws(body)
+
+        def as_list(addrs: list[str]) -> str:
+            emails = [_parse_address(a)[1] for a in addrs]
+            return "{" + ", ".join(f'"{_as_escape(e)}"' for e in emails) + "}"
+
+        def add_recips(kind_: str, addrs: list[str]) -> str:
+            lines = []
+            for addr in addrs:
+                name, email = _parse_address(addr)
+                lines.append(
+                    f"        make new {kind_} recipient at end of {kind_} recipients"
+                    f" of o with properties"
+                    f' {{address:"{_as_escape(email)}", name:"{_as_escape(name)}"}}'
+                )
+            return "\n".join(lines)
+
+        to_list = to_addresses or []
+        cc_list = cc_addresses or []
+        bcc_list = bcc_addresses or []
+
+        if kind == "reply":
+            compose_cmd = (
+                "reply srcMsg with opening window "
+                + ("with" if reply_all else "without")
+                + " reply to all"
+            )
+        elif kind == "forward":
+            compose_cmd = "forward srcMsg with opening window"
+        else:  # pragma: no cover - internal misuse
+            raise ValueError(f"unknown compose kind {kind!r}")
+
+        # A forward's recipients are exactly what the caller asked for (Mail
+        # adds none). A reply's To/Cc come from the original, so for those we
+        # only check that the extras we added are present.
+        exact_recips = "true" if kind == "forward" else "false"
+        select_all = "true" if (kind == "reply" and not include_quoted) else "false"
+
+        script = f"""on stripWS(s)
+    set oldTIDs to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to {{space, tab, return, linefeed, character id 160, character id 8232, character id 8233}}
+    set parts to text items of s
+    set AppleScript's text item delimiters to ""
+    set r to parts as string
+    set AppleScript's text item delimiters to oldTIDs
+    return r
+end stripWS
+
+on addrsOf(recips)
+    set out to {{}}
+    tell application "Mail"
+        repeat with r in recips
+            try
+                set end of out to ((address of r) as string)
+            end try
+        end repeat
+    end tell
+    return out
+end addrsOf
+
+on recipsOK(actual, expected, exact)
+    if exact and (count of actual) is not (count of expected) then return false
+    repeat with e in expected
+        if (e as string) is not in actual then return false
+    end repeat
+    return true
+end recipsOK
+
+on focusBody(expectedTitle)
+    tell application "System Events"
+        tell process "Mail"
+            set w to front window
+            if (name of w) is not expectedTitle then return "wrong_front_window:" & (name of w)
+            repeat with g1 in (groups of w)
+                try
+                    repeat with g2 in (groups of g1)
+                        repeat with sa in (scroll areas of g2)
+                            repeat with ue in (UI elements of sa)
+                                if role of ue is "AXWebArea" then
+                                    set focused of ue to true
+                                    return "ok"
+                                end if
+                            end repeat
+                        end repeat
+                    end repeat
+                end try
+            end repeat
+        end tell
+    end tell
+    return "body_field_not_found"
+end focusBody
+
+on sendReport(status, o, extra)
+    tell application "Mail"
+        set s to status & linefeed & extra
+        try
+            set s to s & linefeed & "SUBJECT:" & ((subject of o) as string)
+        end try
+        try
+            set s to s & linefeed & "FROM:" & ((sender of o) as string)
+        end try
+        try
+            repeat with r in (every to recipient of o)
+                set s to s & linefeed & "TO:" & ((address of r) as string)
+            end repeat
+            repeat with r in (every cc recipient of o)
+                set s to s & linefeed & "CC:" & ((address of r) as string)
+            end repeat
+            repeat with r in (every bcc recipient of o)
+                set s to s & linefeed & "BCC:" & ((address of r) as string)
+            end repeat
+        end try
+    end tell
+    return s
+end sendReport
+
+on leaveOpen(o, reason)
+    -- Not sending: keep the work as a draft, in front, for the user.
+    tell application "Mail"
+        try
+            save o
+        end try
+        try
+            activate
+        end try
+    end tell
+    return my sendReport("NOTSENT", o, "REASON:" & reason)
+end leaveOpen
+
+set hasBody to {"true" if has_body else "false"}
+set selectAll to {select_all}
+set expectedNorm to "{_as_escape(expected_norm)}"
+
+tell application "Mail"
+    -- By-id reference first: it resolves in milliseconds, where `whose id`
+    -- scans the mailbox (seconds on a large INBOX). Fall back to the scan,
+    -- retried, because `whose` can briefly miss while Mail re-indexes.
+    set srcMsg to missing value
+    try
+        -- «class mssg» is `message`; spelled raw because `message id N`
+        -- parses as Mail's "message id" property and fails to compile.
+        set candidate to «class mssg» id {int(message_id)} of mailbox "{_as_escape(mbox_name)}" of account "{_as_escape(acct_name)}"
+        set _probe to subject of candidate
+        set srcMsg to candidate
+    end try
+    if srcMsg is missing value then
+        set srcMsgList to {{}}
+        repeat 4 times
+            try
+                set srcMsgList to (every message of mailbox "{_as_escape(mbox_name)}" of account "{_as_escape(acct_name)}" whose id is {int(message_id)})
+            end try
+            if (count of srcMsgList) > 0 then exit repeat
+            delay 1
+        end repeat
+        if (count of srcMsgList) is 0 then return "ERROR:message_not_found"
+        set srcMsg to item 1 of srcMsgList
+    end if
+
+    set preCount to count of (get outgoing messages)
+    {compose_cmd}
+
+    -- Wait for the compose session to appear, then for Mail to fill its body.
+    set waited to 0
+    repeat while (count of (get outgoing messages)) is preCount and waited < 20
+        delay 0.25
+        set waited to waited + 1
+    end repeat
+    if (count of (get outgoing messages)) is preCount then return "ERROR:compose_did_not_open"
+    set o to last item of (get outgoing messages)
+    delay 1.5
+
+{add_recips("to", to_list)}
+{add_recips("cc", cc_list)}
+{add_recips("bcc", bcc_list)}
+    set outSubj to (subject of o) as string
+end tell
+
+if hasBody then
+    tell application "Mail" to activate
+    delay 0.3
+    set savedClip to missing value
+    try
+        set savedClip to the clipboard
+    end try
+    set the clipboard to "{_as_escape(body)}"
+    set focusResult to my focusBody(outSubj)
+    set pasteErr to ""
+    if focusResult is "ok" then
+        delay 0.3
+        try
+            tell application "System Events"
+                tell process "Mail"
+                    if selectAll then
+                        keystroke "a" using command down
+                    else
+                        key code 126 using command down
+                    end if
+                    delay 0.2
+                    keystroke "v" using command down
+                end tell
+            end tell
+        on error errMsg
+            set pasteErr to errMsg
+        end try
+        delay 0.7
+    end if
+    try
+        if savedClip is not missing value then set the clipboard to savedClip
+    end try
+    if focusResult is not "ok" then return my leaveOpen(o, focusResult)
+    if pasteErr is not "" then return my leaveOpen(o, "paste_failed:" & pasteErr)
+end if
+
+tell application "Mail"
+    save o
+    delay 1.5
+
+    if hasBody then
+        -- Read back the newest saved draft with this subject; ids only grow.
+        set bestId to -1
+        set draftText to ""
+        repeat with acc in (every account)
+            try
+                if enabled of acc then
+                    repeat with mb in (every mailbox of acc)
+                        if (name of mb) contains "raft" then
+                            repeat with d in (every message of mb whose subject is outSubj)
+                                try
+                                    set dId to (id of d) as integer
+                                    if dId > bestId then
+                                        set bestId to dId
+                                        set draftText to (content of d) as string
+                                    end if
+                                end try
+                            end repeat
+                        end if
+                    end repeat
+                end if
+            end try
+        end repeat
+        if bestId is -1 then return my leaveOpen(o, "draft_not_found_for_verification")
+        set limitLen to (length of expectedNorm) * 2 + 500
+        if (length of draftText) > limitLen then set draftText to text 1 thru limitLen of draftText
+        set draftNorm to my stripWS(draftText)
+        considering case
+            set bodyOK to (draftNorm starts with expectedNorm)
+        end considering
+        if not bodyOK then return my leaveOpen(o, "body_not_in_message")
+    end if
+
+    if not my recipsOK(my addrsOf(every to recipient of o), {as_list(to_list)}, {exact_recips}) then return my leaveOpen(o, "to_recipients_mismatch")
+    if not my recipsOK(my addrsOf(every cc recipient of o), {as_list(cc_list)}, {exact_recips}) then return my leaveOpen(o, "cc_recipients_mismatch")
+    if not my recipsOK(my addrsOf(every bcc recipient of o), {as_list(bcc_list)}, {exact_recips}) then return my leaveOpen(o, "bcc_recipients_mismatch")
+    if (count of (every to recipient of o)) is 0 then return my leaveOpen(o, "no_recipients")
+
+    -- Capture the report before sending: the object goes away once sent.
+    set preSend to my sendReport("SENT", o, "")
+    set ok to send o
+    if not ok then return my leaveOpen(o, "send_returned_false")
+
+    set outboxState to "left"
+    set tries to 0
+    repeat
+        set queued to 0
+        try
+            set queued to count of (every message of outbox whose subject is outSubj)
+        end try
+        if queued is 0 then exit repeat
+        set tries to tries + 1
+        if tries > 16 then
+            set outboxState to "still_queued"
+            exit repeat
+        end if
+        delay 0.5
+    end repeat
+    return preSend & linefeed & "OUTBOX:" & outboxState
+end tell
+"""
+
+        raw = self._run_applescript(script, timeout=55)
+        if raw is None:
+            # The script may have died after `send` ran; never claim it didn't.
+            return {
+                "sent": None,
+                "reason": "script_failed_or_timed_out",
+                "subject": "",
+                "from": "",
+                "to_addresses": [],
+                "cc_addresses": [],
+                "bcc_addresses": [],
+            }
+        return _parse_send_report(raw)
 
     def get_flag(self, message_id: int) -> dict:
         """Return flag status and color index for a message.

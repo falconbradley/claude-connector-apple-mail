@@ -25,6 +25,8 @@ Packaged as an [MCPB desktop extension](https://support.claude.com/en/articles/1
 | `get_email_attachment` | Retrieve attachment content (base64) |
 | `create_email_draft` | Create a draft email saved to Mail.app's Drafts mailbox, returns a `message://` link to open it |
 | `create_email_reply_draft` | Reply to an existing message — preserves `In-Reply-To`/`References` headers so the reply threads correctly in the recipient's client |
+| `send_email_reply` | Reply to a message and send it immediately — off unless sending is turned on (see [Sending email](#sending-email)) |
+| `send_email_forward` | Forward a message with its attachments and an optional note, and send it immediately — off unless sending is turned on |
 | `get_email_flag` | Get the flag status and color (e.g. `"orange"`) for an email |
 | `set_email_flag` | Set or remove a color flag on an email (red/orange/yellow/green/blue/purple/gray, or null to remove) |
 
@@ -128,7 +130,28 @@ The fallback scales poorly, and past a couple hundred thousand messages some sea
 - **Only Round 2 (display properties) is left short** → results are returned with just the Round 1 fields rather than failing. When you filtered on subject or sender those are already populated, so the degraded result usually looks identical to the full one.
 - **`has_attachments` is rejected outright.** Mail.app exposes no bulk attachment property and reading it per message costs minutes, so this filter needs the fast engine. On the fallback it raises instead of silently returning unfiltered results, and search results report `has_attachments: null` ("not determined") rather than a misleading `false` — use `get_email` for an authoritative answer on one message.
 
-Writes — drafts, reply drafts, flag changes — always go through Mail.app scripting (Automation permission), so Mail.app owns every mutation and syncs it back to the server (e.g. iCloud) itself.
+Writes — drafts, reply drafts, flag changes, and sends — always go through Mail.app scripting (Automation permission), so Mail.app owns every mutation and syncs it back to the server (e.g. iCloud) itself.
+
+### Sending email
+
+Sending is **off by default**. Drafting is always available; to let Claude send replies and forwards itself, turn on **Allow sending email** in the Apple Mail extension's settings in Claude Desktop. While it is off, the two send tools refuse without touching Mail and point Claude back at the draft tools.
+
+There are two sending tools, and they are deliberately separate from the draft tools rather than a "send" option on them. Claude Desktop sets permissions per tool, so you can let Claude draft freely while still approving every send, and the approval prompt shows the recipients and the full text before anything goes out. Both tools are marked destructive and open-world in their MCP annotations.
+
+- **`send_email_reply`** replies with Mail's own reply command, so the message threads correctly and quotes the original the way Mail does.
+- **`send_email_forward`** forwards with Mail's own forward command, so headers, body and attachments go along, with an optional note on top.
+
+Each tool composes and sends in one scripting run. That is not just convenience: AppleScript can only send a message whose compose session is still open, and a draft that outlives its session is an ordinary message in Drafts that scripting cannot send at all.
+
+Before sending, the tool saves the message, reads the saved copy back, and checks it:
+
+- the reply text or forward note must be at the top of the body (whitespace aside);
+- a forward's recipients must exactly match the request, and a reply's extra Cc/Bcc must be present;
+- text is only ever pasted into a window whose title is the message's subject.
+
+If any check fails, nothing is sent: the message stays saved as a draft, open in front of you, and the tool reports why. If Mail does not finish in time the tool says the outcome is unknown and tells Claude not to retry, since a retry could send twice. After sending, it watches the Outbox and looks for the copy in Sent, and reports `sent`, `sent_unconfirmed` (sent, Sent copy not visible yet) or `queued_in_outbox` (Mail has not delivered it yet and will keep retrying).
+
+Placing the reply text and forward notes uses keyboard paste into Mail's compose window, so it needs **Accessibility** permission (see [Permissions](#permissions)), the same as `create_email_reply_draft`. Your clipboard is restored afterwards.
 
 ---
 
@@ -180,6 +203,7 @@ Two macOS permissions matter:
 
 1. **Full Disk Access** (for the fast read path): System Settings > Privacy & Security > Full Disk Access > enable **uv**. Claude Desktop launches extension servers through a helper that makes the spawned process itself responsible for permissions, so macOS attributes FDA to the `uv` launcher binary — enabling Claude Desktop alone is *not* sufficient. If `uv` isn't in the list, add it with **+** (press ⌘⇧G to paste a path): the installed extension uses `~/Library/Application Support/Claude/uv-runtime/<version>/uv` — the fallback's error message prints the exact path — while a manual `claude_desktop_config.json` setup uses whichever `uv` is on your `PATH` (e.g. `~/.local/bin/uv`). Then quit Claude (⌘Q) and reopen it; macOS reads this permission only at launch. Without FDA, reads still work via the slow AppleScript fallback. (Enable your terminal app too if you want to run the selftest.)
 2. **Automation** (for writes and the fallback): Mail.app must be running; macOS prompts automatically on first use — click **OK**. If the prompt doesn't appear, check System Settings > Privacy & Security > Automation.
+3. **Accessibility** (for reply drafts and sending): placing reply text and forward notes pastes into Mail's compose window, which macOS allows only with Accessibility permission (System Settings > Privacy & Security > Accessibility). Without it, reply drafts lack your text and the send tools refuse to send.
 
 ### Using several Apple connectors
 
@@ -208,6 +232,8 @@ Once installed, just ask Claude naturally:
 - *"Draft a reply to John's email about the project update"*
 - *"Reply-all to that thread saying I'll review by EOD"*
 - *"Create a draft email to the team announcing Friday's meeting"*
+- *"Reply to Sam and send it: Thursday works for me"* (needs sending turned on)
+- *"Forward that invoice to accounts@example.com"* (needs sending turned on)
 - *"Flag this email as orange"*
 - *"What color is the flag on that email from Sarah?"*
 
@@ -287,6 +313,7 @@ Times measured against ~61K messages across 7 mailboxes. Searches without option
 - [x] Create draft emails (saved to Drafts with a `message://` link to open)
 - [x] Reply to a thread (preserves `In-Reply-To`/`References` headers)
 - [x] Set, change, or remove color flags on emails
+- [x] Send replies and forwards (off by default)
 - [ ] Mark as read / unread
 - [ ] Move to folder
 - [ ] Delete (move to Trash)
@@ -295,8 +322,9 @@ Times measured against ~61K messages across 7 mailboxes. Searches without option
 
 ## Security & privacy
 
-- Read operations never modify your mail: the Envelope Index is opened with `PRAGMA query_only` and `.emlx` files are only ever read. Write operations go through Mail.app scripting and are limited to: creating drafts (saved locally, never sent automatically) and setting/removing flags on messages.
-- No data leaves your machine — this is a local MCP server. Mail.app keeps sole custody of account credentials (iCloud sign-in, OAuth, etc.).
+- Read operations never modify your mail: the Envelope Index is opened with `PRAGMA query_only` and `.emlx` files are only ever read. Write operations go through Mail.app scripting and are limited to: creating drafts, setting/removing flags on messages, and — only if you turn on **Allow sending email** — sending replies and forwards.
+- With sending off (the default), nothing is ever sent. With it on, mail goes out only through Mail.app's own send, to the recipients shown in the tool call.
+- This is a local MCP server; apart from mail you have it send, no data leaves your machine. Mail.app keeps sole custody of account credentials (iCloud sign-in, OAuth, etc.).
 - The open-in-Mail link redirector binds to 127.0.0.1 only, requires a per-install random token on every request, and can only focus Mail.app on a message — it never serves message content.
 - The inline preview card runs in the host's sandboxed iframe with no network access; email HTML is sanitized before rendering and remote images are never fetched, so a message can't phone home when previewed.
 - Full Disk Access (read-only usage) powers the fast search path; without it the extension degrades to Automation-only scripting.

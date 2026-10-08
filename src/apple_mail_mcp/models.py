@@ -89,6 +89,22 @@ class DraftResult(BaseModel):
     draft_link: Optional[str] = None  # message:// URL to open draft in Mail.app
 
 
+class SendResult(BaseModel):
+    # "sent": confirmed in a Sent mailbox. "sent_unconfirmed": left the
+    # Outbox but its Sent copy is not visible yet. "queued_in_outbox": Mail
+    # accepted it but has not delivered it yet (offline, server refused...).
+    status: str
+    subject: str
+    from_address: str = ""
+    to_addresses: list[str]
+    cc_addresses: list[str] = []
+    bcc_addresses: list[str] = []
+    sent_message_id: Optional[int] = None  # the Sent copy, when found
+    mail_link: Optional[str] = None
+    open_link: Optional[str] = None
+    note: Optional[str] = None
+
+
 class FlagStatus(BaseModel):
     message_id: int
     is_flagged: bool

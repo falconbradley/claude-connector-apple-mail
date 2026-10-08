@@ -42,9 +42,10 @@ from __future__ import annotations
 import base64
 import email as email_lib
 import logging
+import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import quote
 
@@ -57,7 +58,7 @@ try:
 except ImportError:  # pragma: no cover - depends on the resolved SDK version
     from mcp.server.fastmcp import FastMCP as _Server  # MCP SDK < 2.0
 
-from mcp.types import CallToolResult
+from mcp.types import CallToolResult, ToolAnnotations
 
 from . import __version__
 from .applescript import _FLAG_COLOR_ORDER
@@ -90,6 +91,7 @@ from .models import (
     Mailbox,
     MailboxStats,
     SearchResult,
+    SendResult,
 )
 
 # ---------------------------------------------------------------------------
@@ -1211,6 +1213,232 @@ def create_email_reply_draft(
         bcc_addresses=bcc or [],
         draft_link=_make_mail_link(rfc_id),
     )
+
+
+# ---------------------------------------------------------------------------
+# Sending (off unless the user turns it on)
+# ---------------------------------------------------------------------------
+
+# Set from the extension's "Allow sending email" setting (manifest user_config).
+SENDING_ENV = "APPLE_MAIL_MCP_ENABLE_SENDING"
+
+_SEND_ANNOTATIONS = dict(
+    readOnlyHint=False,
+    # Sending cannot be undone, and it reaches people outside this machine.
+    destructiveHint=True,
+    idempotentHint=False,
+    openWorldHint=True,
+)
+
+# Why a send was refused, in words for the model to relay. Every one of these
+# leaves the message saved as a draft and open in Mail.
+_NOT_SENT_REASONS = {
+    "body_not_in_message": "the text could not be confirmed in the message body",
+    "body_field_not_found": "Mail's message body field could not be found",
+    "draft_not_found_for_verification": "the saved message could not be read back to check it",
+    "to_recipients_mismatch": "the To recipients in Mail did not match the request",
+    "cc_recipients_mismatch": "the Cc recipients in Mail did not match the request",
+    "bcc_recipients_mismatch": "the Bcc recipients in Mail did not match the request",
+    "no_recipients": "the message had no recipients",
+    "send_returned_false": "Mail refused to send it",
+}
+
+
+def _sending_enabled() -> bool:
+    return os.environ.get(SENDING_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _require_sending() -> None:
+    if not _sending_enabled():
+        raise PermissionError(
+            "Sending email is turned off for the Apple Mail connector, so nothing "
+            "was sent. The user can turn it on with the \"Allow sending email\" "
+            "setting on the Apple Mail extension in Claude Desktop's settings. "
+            "Until then, use create_email_reply_draft or create_email_draft and "
+            "let the user send it from Mail."
+        )
+
+
+def _clean_addresses(field: str, addrs: Optional[list[str]]) -> list[str]:
+    cleaned = [a.strip() for a in (addrs or []) if a and a.strip()]
+    for addr in cleaned:
+        if "@" not in addr:
+            raise ValueError(f"{field}: {addr!r} is not an email address.")
+    return cleaned
+
+
+def _finish_send(kind: str, result: dict, started: datetime) -> SendResult:
+    """Turn the bridge's report into a SendResult, or raise if nothing was sent."""
+    sent = result.get("sent")
+    reason = result.get("reason") or "unknown"
+
+    if sent is None:
+        # The script died or overran. It may have got as far as `send`.
+        raise RuntimeError(
+            f"Mail did not finish the {kind} in time, so it is unknown whether it "
+            "was sent. Do NOT retry: that could send it twice. Ask the user to "
+            "check Mail's Sent and Outbox mailboxes first."
+        )
+    if not sent:
+        if reason in ("message_not_found", "compose_did_not_open"):
+            raise RuntimeError(
+                f"Not sent: Mail could not start the {kind} ({reason}). Nothing "
+                "was created."
+            )
+        why = _NOT_SENT_REASONS.get(reason, reason)
+        raise RuntimeError(
+            f"Not sent: {why}. The {kind} was saved as a draft and left open in "
+            "Mail, so the user can check it and press Send there."
+        )
+
+    subject = result.get("subject") or ""
+    base = dict(
+        subject=subject,
+        from_address=result.get("from") or "",
+        to_addresses=result.get("to_addresses") or [],
+        cc_addresses=result.get("cc_addresses") or [],
+        bcc_addresses=result.get("bcc_addresses") or [],
+    )
+    if result.get("outbox") == "still_queued":
+        return SendResult(
+            status="queued_in_outbox",
+            note=(
+                "Mail accepted the message but it is still in the Outbox -- "
+                "Mail may be offline or the server may have refused it. Mail "
+                "will keep retrying; the user can check the Outbox."
+            ),
+            **base,
+        )
+
+    copy = _require_bridge().find_sent_copy(subject, started - timedelta(seconds=30))
+    if copy is None:
+        return SendResult(
+            status="sent_unconfirmed",
+            note="Mail sent it; its copy has not shown up in Sent yet.",
+            **base,
+        )
+    sent_id = int(copy["id"])
+    return SendResult(
+        status="sent",
+        sent_message_id=sent_id,
+        mail_link=_make_mail_link(copy.get("message_id")),
+        open_link=_make_open_link(sent_id),
+        **base,
+    )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="Send a reply", **_SEND_ANNOTATIONS),
+)
+def send_email_reply(
+    message_id: int,
+    body: str,
+    reply_all: bool = False,
+    cc: Optional[list[str]] = None,
+    bcc: Optional[list[str]] = None,
+    include_quoted: bool = True,
+) -> SendResult:
+    """Reply to an email and SEND it immediately. Cannot be undone.
+
+    Only for when the user has clearly asked to send ("reply and send",
+    "just reply saying..."). If they asked for a draft, want to review it
+    first, or did not say, use create_email_reply_draft instead. Sending is
+    off unless the user turned on the extension's "Allow sending email"
+    setting; when it is off this tool sends nothing and says so.
+
+    Uses Mail.app's native reply, so the message threads correctly and quotes
+    the original the way Mail does. It goes from the account the original
+    was received on, to the original sender (plus everyone else with
+    reply_all). Nothing is sent unless the reply text is confirmed in the
+    message; otherwise it is left as an open draft in Mail and this raises.
+
+    On error, do NOT simply retry -- read the message. A timeout means the
+    reply may already have been sent, and a retry could send it twice.
+
+    After success, tell the user it was sent and to whom. Use the returned
+    status: "sent" (in Sent), "sent_unconfirmed" (sent, Sent copy not visible
+    yet), or "queued_in_outbox" (not delivered yet; Mail keeps retrying).
+
+    Args:
+        message_id:     Integer ID of the email being replied to (from search_emails).
+        body:           Plain-text reply, placed above the quoted original.
+        reply_all:      Also reply to everyone the original was sent to.
+        cc:             Extra Cc addresses, e.g. ["Name <user@example.com>"].
+        bcc:            Extra Bcc addresses.
+        include_quoted: Quote the original below the reply (default true).
+    """
+    _require_sending()
+    if not body or not body.strip():
+        raise ValueError("Reply `body` must be a non-empty string.")
+    cc_list = _clean_addresses("cc", cc)
+    bcc_list = _clean_addresses("bcc", bcc)
+
+    started = datetime.now(timezone.utc)
+    result = _require_bridge().send_reply(
+        message_id,
+        body,
+        reply_all=reply_all,
+        cc_addresses=cc_list,
+        bcc_addresses=bcc_list,
+        include_quoted=include_quoted,
+    )
+    return _finish_send("reply", result, started)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="Forward an email", **_SEND_ANNOTATIONS),
+)
+def send_email_forward(
+    message_id: int,
+    to: list[str],
+    body: Optional[str] = None,
+    cc: Optional[list[str]] = None,
+    bcc: Optional[list[str]] = None,
+) -> SendResult:
+    """Forward an email, with its attachments, and SEND it immediately.
+
+    Only for when the user has clearly asked to forward something now
+    ("forward this to Sam"). It cannot be undone. Sending is off unless the
+    user turned on the extension's "Allow sending email" setting; when it is
+    off this tool sends nothing and says so.
+
+    Uses Mail.app's native forward, so the original's headers, body and
+    attachments go along. It is sent from the account the original was
+    received on. An optional note goes above the forwarded message. Nothing
+    is sent unless the recipients in Mail exactly match `to`/`cc`/`bcc` and
+    any note is confirmed in the message; otherwise it is left as an open
+    draft in Mail and this raises.
+
+    On error, do NOT simply retry -- read the message. A timeout means the
+    forward may already have been sent, and a retry could send it twice.
+
+    After success, tell the user it was forwarded and to whom, using the
+    returned status as for send_email_reply.
+
+    Args:
+        message_id: Integer ID of the email to forward (from search_emails).
+        to:         Recipients, e.g. ["Name <user@example.com>", "other@example.com"].
+        body:       Optional plain-text note placed above the forwarded message.
+        cc:         Optional Cc addresses.
+        bcc:        Optional Bcc addresses.
+    """
+    _require_sending()
+    to_list = _clean_addresses("to", to)
+    if not to_list:
+        raise ValueError("At least one recipient in `to` is required.")
+    cc_list = _clean_addresses("cc", cc)
+    bcc_list = _clean_addresses("bcc", bcc)
+    note = _optional(body)
+
+    started = datetime.now(timezone.utc)
+    result = _require_bridge().send_forward(
+        message_id,
+        to_list,
+        body=note,
+        cc_addresses=cc_list,
+        bcc_addresses=bcc_list,
+    )
+    return _finish_send("forward", result, started)
 
 
 # ---------------------------------------------------------------------------

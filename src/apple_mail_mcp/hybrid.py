@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import datetime
 from typing import Any, Optional
 
 from .applescript import MailBridge
@@ -262,3 +263,44 @@ class HybridBridge:
 
     def create_reply_draft(self, *args: Any, **kwargs: Any) -> dict:
         return self._jxa().create_reply_draft(*args, **kwargs)
+
+    def send_reply(self, message_id: int, *args: Any, **kwargs: Any) -> dict:
+        return self._jxa(for_message=message_id).send_reply(message_id, *args, **kwargs)
+
+    def send_forward(self, message_id: int, *args: Any, **kwargs: Any) -> dict:
+        return self._jxa(for_message=message_id).send_forward(message_id, *args, **kwargs)
+
+    def find_sent_copy(
+        self, subject: str, sent_after: datetime, *, wait_seconds: float = 15.0
+    ) -> Optional[dict]:
+        """Find the copy of a just-sent message in a Sent mailbox.
+
+        Mail files the sent copy a moment after the Outbox empties, and the
+        Envelope Index catches up after that, so this polls. The first real
+        send (2026-10-08, iCloud) was still missing at 6s and present a few
+        seconds later; 15s leaves headroom inside the client's 60s limit,
+        since the compose-and-send script itself takes about 7s. Returns
+        the search row ({"id", "subject", ...}) or None -- None means "not
+        visible yet", not "not sent".
+        """
+        env = self._envelope()
+        if env is None or not subject:
+            return None
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            try:
+                _total, rows = env.search_messages(
+                    mailbox_name="sent",
+                    subject_contains=subject,
+                    since=sent_after,
+                    limit=5,
+                )
+            except Exception:
+                logger.debug("Sent-copy lookup failed.", exc_info=True)
+                rows = []
+            exact = [r for r in rows if (r.get("subject") or "") == subject]
+            if exact:
+                return exact[0]
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.75)
